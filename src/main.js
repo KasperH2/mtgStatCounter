@@ -2,7 +2,6 @@ import "./style.css";
 import { allowedEmails, supabase } from "./supabaseClient";
 
 const app = document.querySelector("#app");
-const STATE_ROW_ID = 1;
 
 const initialState = {
   rowDecks: [
@@ -122,62 +121,86 @@ function isAllowedUser(user) {
   return allowedEmails.includes(String(user.email || "").toLowerCase());
 }
 
-function serializeState() {
-  return {
-    rowDecks: [...state.rowDecks],
-    columnDecks: [...state.columnDecks],
-    matrix: state.matrix.map((row) =>
-      row.map((cell) => ({
-        score: Number(cell.score || 0),
-        games: Number(cell.games || 0)
-      }))
-    )
-  };
+function deckLayoutRows() {
+  const rowRows = state.rowDecks.map((deckName, position) => ({
+    axis: "row",
+    position,
+    deck_name: deckName,
+    updated_by: currentUser.id
+  }));
+
+  const columnRows = state.columnDecks.map((deckName, position) => ({
+    axis: "column",
+    position,
+    deck_name: deckName,
+    updated_by: currentUser.id
+  }));
+
+  return [...rowRows, ...columnRows];
 }
 
-function applyStatePayload(payload) {
-  if (!payload) return false;
-
-  const rowDecks = Array.isArray(payload.rowDecks) ? payload.rowDecks : null;
-  const columnDecks = Array.isArray(payload.columnDecks) ? payload.columnDecks : null;
-  const matrix = Array.isArray(payload.matrix) ? payload.matrix : null;
-
-  if (!rowDecks || !columnDecks || !matrix) return false;
-  if (!rowDecks.length || !columnDecks.length || matrix.length !== rowDecks.length) return false;
-
-  const normalizedMatrix = matrix.map((row) => {
-    if (!Array.isArray(row) || row.length !== columnDecks.length) return null;
-    return row.map((cell) => ({
-      score: Math.trunc(Number((cell && cell.score) || 0)),
-      games: Math.max(0, Math.trunc(Number((cell && cell.games) || 0)))
-    }));
-  });
-
-  if (normalizedMatrix.some((row) => row === null)) return false;
-
-  state.rowDecks = rowDecks.map((name) => String(name));
-  state.columnDecks = columnDecks.map((name) => String(name));
-  state.matrix = normalizedMatrix;
-  return true;
+function matchupRows() {
+  return state.rowDecks.flatMap((rowDeck, rowIndex) =>
+    state.columnDecks.map((columnDeck, colIndex) => {
+      const cell = state.matrix[rowIndex][colIndex];
+      return {
+        row_deck: rowDeck,
+        column_deck: columnDeck,
+        score: Math.trunc(Number(cell.score || 0)),
+        games: Math.max(0, Math.trunc(Number(cell.games || 0))),
+        updated_by: currentUser.id
+      };
+    })
+  );
 }
 
 async function loadRemoteState() {
-  const { data, error } = await supabase
-    .from("app_state")
-    .select("payload")
-    .eq("id", STATE_ROW_ID)
-    .maybeSingle();
+  const [{ data: deckData, error: deckError }, { data: cellData, error: cellError }] = await Promise.all([
+    supabase.from("deck_layout").select("axis, position, deck_name").order("position", { ascending: true }),
+    supabase.from("matchup_cells").select("row_deck, column_deck, score, games")
+  ]);
 
-  if (error) {
-    throw error;
-  }
+  if (deckError) throw deckError;
+  if (cellError) throw cellError;
 
-  if (!data) {
+  const rowDecks = (deckData || [])
+    .filter((row) => row.axis === "row")
+    .sort((a, b) => a.position - b.position)
+    .map((row) => String(row.deck_name));
+
+  const columnDecks = (deckData || [])
+    .filter((row) => row.axis === "column")
+    .sort((a, b) => a.position - b.position)
+    .map((row) => String(row.deck_name));
+
+  if (!rowDecks.length || !columnDecks.length || !(cellData || []).length) {
     await persistRemoteState("idle");
     return;
   }
 
-  applyStatePayload(data.payload);
+  const matrix = rowDecks.map(() => columnDecks.map(() => ({ score: 0, games: 0 })));
+  const cellMap = new Map(
+    (cellData || []).map((cell) => [
+      `${String(cell.row_deck)}__${String(cell.column_deck)}`,
+      {
+        score: Math.trunc(Number(cell.score || 0)),
+        games: Math.max(0, Math.trunc(Number(cell.games || 0)))
+      }
+    ])
+  );
+
+  rowDecks.forEach((rowDeck, rowIndex) => {
+    columnDecks.forEach((columnDeck, colIndex) => {
+      const key = `${rowDeck}__${columnDeck}`;
+      if (cellMap.has(key)) {
+        matrix[rowIndex][colIndex] = cellMap.get(key);
+      }
+    });
+  });
+
+  state.rowDecks = rowDecks;
+  state.columnDecks = columnDecks;
+  state.matrix = matrix;
 }
 
 async function persistRemoteState(successStatus = "saved") {
@@ -186,17 +209,19 @@ async function persistRemoteState(successStatus = "saved") {
   saveStatus = "saving";
   render();
 
-  const payload = serializeState();
-  const { error } = await supabase.from("app_state").upsert(
-    {
-      id: STATE_ROW_ID,
-      payload,
-      updated_by: currentUser.id
-    },
-    { onConflict: "id" }
-  );
+  const { error: deckError } = await supabase.from("deck_layout").upsert(deckLayoutRows(), {
+    onConflict: "axis,position"
+  });
+  if (deckError) {
+    saveStatus = "error";
+    render();
+    return;
+  }
 
-  if (error) {
+  const { error: cellError } = await supabase.from("matchup_cells").upsert(matchupRows(), {
+    onConflict: "row_deck,column_deck"
+  });
+  if (cellError) {
     saveStatus = "error";
     render();
     return;
@@ -372,25 +397,6 @@ function updateDeckName(type, index, value) {
   render();
 }
 
-function updateCellValue(rowIndex, colIndex, key, rawValue) {
-  const parsed = Number(rawValue);
-  if (Number.isNaN(parsed)) return;
-
-  const cell = state.matrix[rowIndex][colIndex];
-  if (key === "score") {
-    cell.score = Math.trunc(parsed);
-    if (cell.games < Math.abs(cell.score)) {
-      cell.games = Math.abs(cell.score);
-    }
-  } else {
-    cell.games = Math.max(0, Math.trunc(parsed));
-  }
-
-  sortMode = "none";
-  scheduleSave();
-  render();
-}
-
 function nudgeCellValue(rowIndex, colIndex, key, delta) {
   const cell = state.matrix[rowIndex][colIndex];
   if (key === "score") {
@@ -461,11 +467,9 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
   minusButton.textContent = "-";
   minusButton.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "score", -1));
 
-  const valueInput = document.createElement("input");
-  valueInput.type = "number";
-  valueInput.className = "popover-input";
-  valueInput.value = String(cellData.score);
-  valueInput.addEventListener("change", (event) => updateCellValue(rowIndex, colIndex, "score", event.target.value));
+  const scoreValue = document.createElement("span");
+  scoreValue.className = "popover-input";
+  scoreValue.textContent = String(cellData.score);
 
   const plusButton = document.createElement("button");
   plusButton.type = "button";
@@ -477,12 +481,9 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
   gamesLabel.className = "games-label";
   gamesLabel.textContent = "G";
 
-  const gamesInput = document.createElement("input");
-  gamesInput.type = "number";
-  gamesInput.min = "0";
-  gamesInput.className = "popover-input";
-  gamesInput.value = String(cellData.games);
-  gamesInput.addEventListener("change", (event) => updateCellValue(rowIndex, colIndex, "games", event.target.value));
+  const gamesValue = document.createElement("span");
+  gamesValue.className = "popover-input";
+  gamesValue.textContent = String(cellData.games);
 
   const gamesMinus = document.createElement("button");
   gamesMinus.type = "button";
@@ -506,8 +507,8 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
     render();
   });
 
-  scoreRow.append(minusButton, valueInput, plusButton);
-  gameRow.append(gamesMinus, gamesLabel, gamesInput, gamesPlus);
+  scoreRow.append(minusButton, scoreValue, plusButton);
+  gameRow.append(gamesMinus, gamesLabel, gamesValue, gamesPlus);
   popover.append(closeButton, scoreRow, gameRow);
 
   shell.append(value);
