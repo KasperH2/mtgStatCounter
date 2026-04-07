@@ -1,0 +1,920 @@
+import "./style.css";
+import { allowedEmails, supabase } from "./supabaseClient";
+
+const app = document.querySelector("#app");
+const STATE_ROW_ID = 1;
+
+const initialState = {
+  rowDecks: [
+    "Dragons",
+    "Spirit",
+    "Keyword",
+    "Sphinx",
+    "Sacrifice",
+    "Lifegain",
+    "Door",
+    "Eldrazi",
+    "Vehicle",
+    "Knights",
+    "Proliferate",
+    "Wurm",
+    "Deathfed",
+    "Token",
+    "Funfungus",
+    "Bloodrush"
+  ],
+  columnDecks: [
+    "Giants",
+    "Humans",
+    "+1/+1 Counter",
+    "Reanimate",
+    "Flicker",
+    "Untap",
+    "Scry",
+    "Delirium",
+    "Discard",
+    "Nightmare",
+    "20/20",
+    "Heroic",
+    "Zombies",
+    "Hand Deck",
+    "Activated",
+    "Grolnok"
+  ],
+  cells: [
+    [0, 0, 2, -1, 3, 0, -4, 0, 0, 0, 0, 2, 0, -1, -1, 2],
+    [2, -1, 0, -1, 1, -1, 0, 2, -5, 0, -1, -3, -3, -1, 0, 1],
+    [0, 0, 0, 0, 0, 0, 1, 0, 0, -1, 1, -1, 2, 0, 1, 0],
+    [0, 0, -1, 0, -2, 0, -1, 0, 0, 2, 0, -1, 0, 1, 0, 0],
+    [1, 1, 1, 0, 4, 0, 2, -5, 0, 1, 0, 1, 0, -1, 0, 0],
+    [0, 2, 0, -1, 3, 0, -1, 0, 0, -2, 0, -2, 1, -2, 0, 1],
+    [1, 0, 0, 0, 0, -2, 1, 1, 0, 0, 0, 2, -2, 0, 0, 0],
+    [0, 1, 1, 1, -1, 0, 4, -2, 2, 1, -1, 1, 2, 1, 0, 0],
+    [0, 0, 0, 0, 1, 0, 1, 0, -1, 0, -2, 1, 0, 0, -1, -1],
+    [1, 0, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, -2, 1],
+    [1, 1, 1, 0, 0, 2, 2, 4, 2, 0, 1, 1, 1, 2, 0, 1],
+    [0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 2, 1, 0, 1, 1, 0],
+    [0, -1, 1, 1, 2, 2, -1, 0, 0, 1, 0, 0, 2, 2, 0, 0],
+    [1, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1, 1],
+    [0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, -2, 2],
+    [0, 0, 0, -1, 1, 0, -1, 1, 1, 2, 2, 0, 0, 0, -6, 0]
+  ]
+};
+
+function makeDefaultMatrix() {
+  return initialState.cells.map((row) =>
+    row.map((score) => ({ score, games: Math.abs(score) }))
+  );
+}
+
+const state = {
+  rowDecks: [...initialState.rowDecks],
+  columnDecks: [...initialState.columnDecks],
+  matrix: makeDefaultMatrix()
+};
+
+let isDarkMode = false;
+let activeEditor = null;
+let displayMode = "wins";
+let scoreMinGamesFilter = 0;
+let scoreMinAbsFilter = 0;
+let gamesMinFilter = 0;
+let gamesMaxFilter = 9999;
+let sortMode = "none";
+let accountOpen = false;
+let highlightOpen = false;
+
+let currentUser = null;
+let isInitializing = true;
+let authError = "";
+let authBusy = false;
+let saveStatus = "idle";
+let saveTimer = null;
+
+function loadThemePreference() {
+  const saved = window.localStorage.getItem("mtg-theme");
+  isDarkMode = saved === "dark";
+  document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
+}
+
+function toggleTheme() {
+  isDarkMode = !isDarkMode;
+  document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
+  window.localStorage.setItem("mtg-theme", isDarkMode ? "dark" : "light");
+  render();
+}
+
+function openAccountPanel() {
+  accountOpen = true;
+  highlightOpen = false;
+  render();
+}
+
+function openHighlightPanel() {
+  highlightOpen = true;
+  accountOpen = false;
+  render();
+}
+
+function isAllowedUser(user) {
+  if (!user) return false;
+  if (!allowedEmails.length) return true;
+  return allowedEmails.includes(String(user.email || "").toLowerCase());
+}
+
+function serializeState() {
+  return {
+    rowDecks: [...state.rowDecks],
+    columnDecks: [...state.columnDecks],
+    matrix: state.matrix.map((row) =>
+      row.map((cell) => ({
+        score: Number(cell.score || 0),
+        games: Number(cell.games || 0)
+      }))
+    )
+  };
+}
+
+function applyStatePayload(payload) {
+  if (!payload) return false;
+
+  const rowDecks = Array.isArray(payload.rowDecks) ? payload.rowDecks : null;
+  const columnDecks = Array.isArray(payload.columnDecks) ? payload.columnDecks : null;
+  const matrix = Array.isArray(payload.matrix) ? payload.matrix : null;
+
+  if (!rowDecks || !columnDecks || !matrix) return false;
+  if (!rowDecks.length || !columnDecks.length || matrix.length !== rowDecks.length) return false;
+
+  const normalizedMatrix = matrix.map((row) => {
+    if (!Array.isArray(row) || row.length !== columnDecks.length) return null;
+    return row.map((cell) => ({
+      score: Math.trunc(Number((cell && cell.score) || 0)),
+      games: Math.max(0, Math.trunc(Number((cell && cell.games) || 0)))
+    }));
+  });
+
+  if (normalizedMatrix.some((row) => row === null)) return false;
+
+  state.rowDecks = rowDecks.map((name) => String(name));
+  state.columnDecks = columnDecks.map((name) => String(name));
+  state.matrix = normalizedMatrix;
+  return true;
+}
+
+async function loadRemoteState() {
+  const { data, error } = await supabase
+    .from("app_state")
+    .select("payload")
+    .eq("id", STATE_ROW_ID)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data) {
+    await persistRemoteState("idle");
+    return;
+  }
+
+  applyStatePayload(data.payload);
+}
+
+async function persistRemoteState(successStatus = "saved") {
+  if (!supabase || !currentUser) return;
+
+  saveStatus = "saving";
+  render();
+
+  const payload = serializeState();
+  const { error } = await supabase.from("app_state").upsert(
+    {
+      id: STATE_ROW_ID,
+      payload,
+      updated_by: currentUser.id
+    },
+    { onConflict: "id" }
+  );
+
+  if (error) {
+    saveStatus = "error";
+    render();
+    return;
+  }
+
+  saveStatus = successStatus;
+  render();
+
+  window.setTimeout(() => {
+    if (saveStatus === "saved") {
+      saveStatus = "idle";
+      render();
+    }
+  }, 1200);
+}
+
+function scheduleSave() {
+  if (!currentUser || !supabase) return;
+
+  saveStatus = "pending";
+  render();
+
+  if (saveTimer) {
+    window.clearTimeout(saveTimer);
+  }
+
+  saveTimer = window.setTimeout(() => {
+    saveTimer = null;
+    persistRemoteState("saved");
+  }, 1000);
+}
+
+function getRowTotals() {
+  return state.matrix.map((row) => row.reduce((sum, cell) => sum + Number(cell.score || 0), 0));
+}
+
+function getColumnTotals() {
+  return state.columnDecks.map((_, colIndex) =>
+    state.matrix.reduce((sum, row) => sum + Number((row[colIndex] && row[colIndex].score) || 0), 0)
+  );
+}
+
+function getRowGameTotals() {
+  return state.matrix.map((row) => row.reduce((sum, cell) => sum + Number(cell.games || 0), 0));
+}
+
+function getColumnGameTotals() {
+  return state.columnDecks.map((_, colIndex) =>
+    state.matrix.reduce((sum, row) => sum + Number((row[colIndex] && row[colIndex].games) || 0), 0)
+  );
+}
+
+function scoreClass(value) {
+  if (value > 0) return "is-positive";
+  if (value < 0) return "is-negative";
+  return "is-neutral";
+}
+
+function getScoreBackground(score) {
+  const abs = Math.abs(score);
+  if (abs >= 5) return "var(--heat-red)";
+  if (abs === 4) return "var(--heat-orange)";
+  if (abs === 3) return "var(--heat-yellow)";
+  return "var(--surface)";
+}
+
+function getDisplayValue(cellData) {
+  return displayMode === "games" ? cellData.games : cellData.score;
+}
+
+function getCellBackground(cellData) {
+  if (displayMode === "wins") {
+    const hasScoreFilter = scoreMinGamesFilter > 0 || scoreMinAbsFilter > 0;
+    if (!hasScoreFilter) {
+      return getScoreBackground(cellData.score);
+    }
+
+    const passScore = Math.abs(cellData.score) >= scoreMinAbsFilter;
+    const passGames = cellData.games >= scoreMinGamesFilter;
+    return passScore && passGames ? getScoreBackground(cellData.score) : "var(--surface)";
+  }
+
+  const hasRangeFilter = gamesMinFilter > 0 || gamesMaxFilter < 9999;
+  if (!hasRangeFilter) {
+    return "var(--surface)";
+  }
+
+  const pass = cellData.games >= gamesMinFilter && cellData.games <= gamesMaxFilter;
+  return pass ? "var(--heat-highlight)" : "var(--surface)";
+}
+
+function autoSortByPerformance() {
+  const rowTotals = getRowTotals();
+  const columnTotals = getColumnTotals();
+
+  const rowOrder = state.rowDecks.map((_, index) => index).sort((a, b) => rowTotals[a] - rowTotals[b]);
+  const columnOrder = state.columnDecks
+    .map((_, index) => index)
+    .sort((a, b) => columnTotals[b] - columnTotals[a]);
+
+  state.rowDecks = rowOrder.map((index) => state.rowDecks[index]);
+  state.matrix = rowOrder.map((index) => state.matrix[index]);
+
+  state.columnDecks = columnOrder.map((index) => state.columnDecks[index]);
+  state.matrix = state.matrix.map((row) => columnOrder.map((index) => row[index]));
+
+  activeEditor = null;
+}
+
+function sortByMostWins() {
+  autoSortByPerformance();
+  sortMode = "wins";
+  scheduleSave();
+  render();
+}
+
+function sortByMostPlayed() {
+  const rowGameTotals = getRowGameTotals();
+  const columnGameTotals = getColumnGameTotals();
+
+  const rowOrder = state.rowDecks.map((_, index) => index).sort((a, b) => rowGameTotals[b] - rowGameTotals[a]);
+  const columnOrder = state.columnDecks
+    .map((_, index) => index)
+    .sort((a, b) => columnGameTotals[b] - columnGameTotals[a]);
+
+  state.rowDecks = rowOrder.map((index) => state.rowDecks[index]);
+  state.matrix = rowOrder.map((index) => state.matrix[index]);
+
+  state.columnDecks = columnOrder.map((index) => state.columnDecks[index]);
+  state.matrix = state.matrix.map((row) => columnOrder.map((index) => row[index]));
+
+  activeEditor = null;
+  sortMode = "games";
+  scheduleSave();
+  render();
+}
+
+function toggleDisplayMode() {
+  displayMode = displayMode === "wins" ? "games" : "wins";
+  highlightOpen = false;
+  render();
+}
+
+function setFilterValue(kind, value) {
+  const parsed = Number(value);
+  if (Number.isNaN(parsed)) return;
+
+  if (kind === "scoreMinGames") {
+    scoreMinGamesFilter = Math.max(0, Math.trunc(parsed));
+  } else if (kind === "scoreMinAbs") {
+    scoreMinAbsFilter = Math.max(0, Math.trunc(parsed));
+  } else if (kind === "gamesMin") {
+    gamesMinFilter = Math.max(0, Math.trunc(parsed));
+  } else {
+    gamesMaxFilter = Math.max(0, Math.trunc(parsed));
+  }
+
+  highlightOpen = true;
+  render();
+}
+
+function updateDeckName(type, index, value) {
+  const nextName = value.trim();
+  if (!nextName) return;
+
+  if (type === "row") {
+    state.rowDecks[index] = nextName;
+  } else {
+    state.columnDecks[index] = nextName;
+  }
+
+  scheduleSave();
+  render();
+}
+
+function updateCellValue(rowIndex, colIndex, key, rawValue) {
+  const parsed = Number(rawValue);
+  if (Number.isNaN(parsed)) return;
+
+  const cell = state.matrix[rowIndex][colIndex];
+  if (key === "score") {
+    cell.score = Math.trunc(parsed);
+    if (cell.games < Math.abs(cell.score)) {
+      cell.games = Math.abs(cell.score);
+    }
+  } else {
+    cell.games = Math.max(0, Math.trunc(parsed));
+  }
+
+  sortMode = "none";
+  scheduleSave();
+  render();
+}
+
+function nudgeCellValue(rowIndex, colIndex, key, delta) {
+  const cell = state.matrix[rowIndex][colIndex];
+  if (key === "score") {
+    cell.score += delta;
+    cell.games += 1;
+  } else {
+    cell.games = Math.max(0, cell.games + delta);
+  }
+
+  sortMode = "none";
+  scheduleSave();
+  render();
+}
+
+function setActiveEditor(rowIndex, colIndex) {
+  const isSame = activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex;
+  activeEditor = isSame ? null : { row: rowIndex, col: colIndex };
+  render();
+}
+
+function buildHeaderCell(name, type, index) {
+  const cell = document.createElement("th");
+  cell.className = "deck-heading";
+
+  const input = document.createElement("input");
+  input.value = name;
+  input.className = `deck-input ${type === "column" ? "column-input" : "row-input"}`;
+  if (type === "row") {
+    input.size = Math.max(6, name.length);
+  }
+  input.setAttribute("aria-label", `${type === "row" ? "Row" : "Column"} deck name ${index + 1}`);
+  input.addEventListener("change", (event) => updateDeckName(type, index, event.target.value));
+
+  cell.append(input);
+  return cell;
+}
+
+function buildScoreCell(rowIndex, colIndex, cellData) {
+  const cell = document.createElement("td");
+  cell.className = `score-cell ${scoreClass(cellData.score)}`;
+  cell.title = `${state.rowDecks[rowIndex]} vs ${state.columnDecks[colIndex]} | Games played: ${cellData.games}`;
+  cell.style.background = getCellBackground(cellData);
+  cell.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setActiveEditor(rowIndex, colIndex);
+  });
+
+  const shell = document.createElement("div");
+  shell.className = "score-shell";
+
+  const value = document.createElement("div");
+  value.className = "score-value";
+  value.textContent = String(getDisplayValue(cellData));
+
+  const popover = document.createElement("div");
+  popover.className = "cell-popover";
+  popover.addEventListener("click", (event) => event.stopPropagation());
+
+  const scoreRow = document.createElement("div");
+  scoreRow.className = "popover-row";
+
+  const gameRow = document.createElement("div");
+  gameRow.className = "popover-row";
+
+  const minusButton = document.createElement("button");
+  minusButton.type = "button";
+  minusButton.className = "side-button side-minus";
+  minusButton.textContent = "-";
+  minusButton.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "score", -1));
+
+  const valueInput = document.createElement("input");
+  valueInput.type = "number";
+  valueInput.className = "popover-input";
+  valueInput.value = String(cellData.score);
+  valueInput.addEventListener("change", (event) => updateCellValue(rowIndex, colIndex, "score", event.target.value));
+
+  const plusButton = document.createElement("button");
+  plusButton.type = "button";
+  plusButton.className = "side-button side-plus";
+  plusButton.textContent = "+";
+  plusButton.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "score", 1));
+
+  const gamesLabel = document.createElement("span");
+  gamesLabel.className = "games-label";
+  gamesLabel.textContent = "G";
+
+  const gamesInput = document.createElement("input");
+  gamesInput.type = "number";
+  gamesInput.min = "0";
+  gamesInput.className = "popover-input";
+  gamesInput.value = String(cellData.games);
+  gamesInput.addEventListener("change", (event) => updateCellValue(rowIndex, colIndex, "games", event.target.value));
+
+  const gamesMinus = document.createElement("button");
+  gamesMinus.type = "button";
+  gamesMinus.className = "side-button games-button";
+  gamesMinus.textContent = "-";
+  gamesMinus.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "games", -1));
+
+  const gamesPlus = document.createElement("button");
+  gamesPlus.type = "button";
+  gamesPlus.className = "side-button games-button";
+  gamesPlus.textContent = "+";
+  gamesPlus.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "games", 1));
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "popover-close";
+  closeButton.textContent = "x";
+  closeButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    activeEditor = null;
+    render();
+  });
+
+  scoreRow.append(minusButton, valueInput, plusButton);
+  gameRow.append(gamesMinus, gamesLabel, gamesInput, gamesPlus);
+  popover.append(closeButton, scoreRow, gameRow);
+
+  shell.append(value);
+
+  if (activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex) {
+    shell.append(popover);
+  }
+
+  cell.append(shell);
+  return cell;
+}
+
+function saveStatusLabel() {
+  if (saveStatus === "pending") return "Pending changes";
+  if (saveStatus === "saving") return "Saving...";
+  if (saveStatus === "saved") return "Saved";
+  if (saveStatus === "error") return "Save failed";
+  return "Synced";
+}
+
+function activeFilterLabel() {
+  if (displayMode === "wins") {
+    if (scoreMinGamesFilter > 0 || scoreMinAbsFilter > 0) {
+      return `Filter: Score | abs >= ${scoreMinAbsFilter}, games >= ${scoreMinGamesFilter}`;
+    }
+    return "Filter: Score | none";
+  }
+
+  if (gamesMinFilter > 0 || gamesMaxFilter < 9999) {
+    return `Filter: Games range (${gamesMinFilter} to ${gamesMaxFilter})`;
+  }
+
+  return "Filter: None";
+}
+
+function renderAuthScreen(configError) {
+  app.innerHTML = `
+    <main class="auth-shell">
+      <section class="auth-card">
+        <h1>MTG Matchup Tracker</h1>
+        <p class="auth-sub">Sign in required</p>
+        ${
+          configError
+            ? `<p class="auth-error">Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.</p>`
+            : ""
+        }
+        ${authError ? `<p class="auth-error">${authError}</p>` : ""}
+        <form class="auth-form" data-auth-form>
+          <label>Email<input type="email" name="email" required /></label>
+          <label>Password<input type="password" name="password" required /></label>
+          <button type="submit" ${authBusy || configError ? "disabled" : ""}>${
+            authBusy ? "Signing in..." : "Sign in"
+          }</button>
+        </form>
+      </section>
+    </main>
+  `;
+
+  const form = app.querySelector("[data-auth-form]");
+  if (form && !configError) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const formData = new FormData(event.currentTarget);
+      const email = String(formData.get("email") || "").trim();
+      const password = String(formData.get("password") || "");
+
+      authBusy = true;
+      authError = "";
+      render();
+
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        authBusy = false;
+        authError = error.message;
+        render();
+      }
+    });
+  }
+}
+
+function renderTableScreen() {
+  const rowTotals = getRowTotals();
+  const columnTotals = getColumnTotals();
+  const rowGameTotals = getRowGameTotals();
+  const columnGameTotals = getColumnGameTotals();
+
+  app.innerHTML = `
+    <main class="page-shell">
+      <section class="panel">
+        <div class="grid-wrap">
+          <table class="matchup-table">
+            <thead>
+              <tr>
+                <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ""}">
+                  <span>Row \\ Column</span>
+                  <div class="top-mini-actions">
+                    <button class="mode-toggle mode-account-small ${accountOpen ? "active" : ""}" type="button" data-account-toggle>
+                      Account
+                    </button>
+                    <button class="theme-toggle mode-theme-small" type="button" data-theme-toggle>
+                      ${isDarkMode ? "Light" : "Dark"}
+                    </button>
+                  </div>
+                  <button class="mode-toggle mode-view mode-main" type="button" data-display-toggle>
+                    ${displayMode === "games" ? "Mode: # of games" : "Mode: Score"}
+                  </button>
+                  <button class="mode-toggle mode-highlight-main ${highlightOpen ? "active" : ""}" type="button" data-highlight-toggle>
+                    Highlight mode
+                  </button>
+                  <p class="view-mode-chip">${activeFilterLabel()}</p>
+                  <div class="sort-mini-wrap">
+                    <button class="sort-mini ${sortMode === "wins" ? "active" : ""}" type="button" data-wins-sort title="Sort by most wins">W</button>
+                    <button class="sort-mini ${sortMode === "games" ? "active" : ""}" type="button" data-games-sort title="Sort by most played">G</button>
+                  </div>
+                  ${
+                    accountOpen
+                      ? `<div class="controls-popover account-popover" data-account-popover>
+                          <section class="controls-section">
+                            <p class="controls-title">Account</p>
+                            <p class="user-chip">${currentUser.email}</p>
+                            <p class="save-chip ${saveStatus}">${saveStatusLabel()}</p>
+                            <div class="controls-actions two-col">
+                              <button class="mode-toggle mode-signout" type="button" data-signout>
+                                Sign out
+                              </button>
+                            </div>
+                          </section>
+                        </div>`
+                      : ""
+                  }
+                  ${
+                    highlightOpen
+                      ? `<div class="controls-popover highlight-popover" data-highlight-popover>
+                          <section class="controls-section">
+                            <p class="controls-title">Highlight</p>
+                            ${
+                              displayMode === "wins"
+                                ? `<div class="filter-wrap">
+                                    <label class="filter-field">Min score difference (abs) >=
+                                      <input type="number" min="0" value="${scoreMinAbsFilter}" data-filter-score-min-abs />
+                                    </label>
+                                    <label class="filter-field">Min number of games >=
+                                      <input type="number" min="0" value="${scoreMinGamesFilter}" data-filter-score-min-games />
+                                    </label>
+                                  </div>`
+                                : `<div class="filter-wrap">
+                                    <label class="filter-field">Min number of games >=
+                                      <input type="number" min="0" value="${gamesMinFilter}" data-filter-games-min />
+                                    </label>
+                                    <label class="filter-field">Max number of games <=
+                                      <input type="number" min="0" value="${gamesMaxFilter}" data-filter-games-max />
+                                    </label>
+                                  </div>`
+                            }
+                          </section>
+                        </div>`
+                      : ""
+                  }
+                </th>
+                ${state.columnDecks.map((_, index) => `<th data-col="${index}"></th>`).join("")}
+                <th class="sum-col">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.rowDecks
+                .map(
+                  (_, rowIndex) => `
+                  <tr data-row="${rowIndex}">
+                    <th data-row-header="${rowIndex}"></th>
+                    ${state.columnDecks
+                      .map((_, colIndex) => `<td data-cell="${rowIndex}-${colIndex}"></td>`)
+                      .join("")}
+                    <td class="sum-cell right-total-cell ${scoreClass(rowTotals[rowIndex])}">
+                      <span class="sum-score">${
+                        displayMode === "games" ? rowGameTotals[rowIndex] : rowTotals[rowIndex]
+                      }</span>
+                    </td>
+                  </tr>
+                `
+                )
+                .join("")}
+            </tbody>
+            <tfoot>
+              <tr>
+                <th class="sum-row-label">Total</th>
+                ${columnTotals
+                  .map(
+                    (value, colIndex) =>
+                      `<td class="sum-cell ${scoreClass(value)}"><span class="sum-score">${
+                        displayMode === "games" ? columnGameTotals[colIndex] : value
+                      }</span></td>`
+                  )
+                  .join("")}
+                <td class="sum-corner"></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </section>
+    </main>
+  `;
+
+  state.columnDecks.forEach((name, index) => {
+    const placeholder = app.querySelector(`[data-col="${index}"]`);
+    if (placeholder) {
+      placeholder.replaceWith(buildHeaderCell(name, "column", index));
+    }
+  });
+
+  state.rowDecks.forEach((name, index) => {
+    const placeholder = app.querySelector(`[data-row-header="${index}"]`);
+    if (placeholder) {
+      placeholder.replaceWith(buildHeaderCell(name, "row", index));
+    }
+  });
+
+  state.matrix.forEach((row, rowIndex) => {
+    row.forEach((cellData, colIndex) => {
+      const placeholder = app.querySelector(`[data-cell="${rowIndex}-${colIndex}"]`);
+      if (placeholder) {
+        placeholder.replaceWith(buildScoreCell(rowIndex, colIndex, cellData));
+      }
+    });
+  });
+
+  const themeToggle = app.querySelector("[data-theme-toggle]");
+  if (themeToggle) themeToggle.addEventListener("click", toggleTheme);
+
+  const accountToggle = app.querySelector("[data-account-toggle]");
+  if (accountToggle) {
+    accountToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openAccountPanel();
+    });
+  }
+
+  const highlightToggle = app.querySelector("[data-highlight-toggle]");
+  if (highlightToggle) {
+    highlightToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openHighlightPanel();
+    });
+  }
+
+  const accountPopover = app.querySelector("[data-account-popover]");
+  if (accountPopover) {
+    accountPopover.addEventListener("click", (event) => event.stopPropagation());
+  }
+
+  const highlightPopover = app.querySelector("[data-highlight-popover]");
+  if (highlightPopover) {
+    highlightPopover.addEventListener("click", (event) => event.stopPropagation());
+  }
+
+  const signOutButton = app.querySelector("[data-signout]");
+  if (signOutButton) {
+    signOutButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await supabase.auth.signOut();
+    });
+  }
+
+  const displayToggle = app.querySelector("[data-display-toggle]");
+  if (displayToggle) {
+    displayToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleDisplayMode();
+    });
+  }
+
+  const gamesSortToggle = app.querySelector("[data-games-sort]");
+  if (gamesSortToggle) {
+    gamesSortToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      sortByMostPlayed();
+    });
+  }
+
+  const winsSortToggle = app.querySelector("[data-wins-sort]");
+  if (winsSortToggle) {
+    winsSortToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      sortByMostWins();
+    });
+  }
+
+  const scoreMinAbsInput = app.querySelector("[data-filter-score-min-abs]");
+  if (scoreMinAbsInput) {
+    scoreMinAbsInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setFilterValue("scoreMinAbs", event.target.value);
+    });
+  }
+
+  const scoreMinGamesInput = app.querySelector("[data-filter-score-min-games]");
+  if (scoreMinGamesInput) {
+    scoreMinGamesInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setFilterValue("scoreMinGames", event.target.value);
+    });
+  }
+
+  const gamesMinInput = app.querySelector("[data-filter-games-min]");
+  if (gamesMinInput) {
+    gamesMinInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setFilterValue("gamesMin", event.target.value);
+    });
+  }
+
+  const gamesMaxInput = app.querySelector("[data-filter-games-max]");
+  if (gamesMaxInput) {
+    gamesMaxInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setFilterValue("gamesMax", event.target.value);
+    });
+  }
+
+  const shell = app.querySelector(".page-shell");
+  if (shell) {
+    shell.addEventListener("click", (event) => {
+      const target = event.target;
+      const targetEl = target instanceof Element ? target : null;
+      if (targetEl && targetEl.closest("[data-highlight-popover]")) return;
+      if (targetEl && targetEl.closest("[data-account-popover]")) return;
+      if (targetEl && targetEl.closest("[data-highlight-toggle]")) return;
+      if (targetEl && targetEl.closest("[data-account-toggle]")) return;
+      if (accountOpen || highlightOpen) {
+        accountOpen = false;
+        highlightOpen = false;
+      }
+      if (activeEditor) {
+        activeEditor = null;
+      }
+      render();
+    });
+  }
+}
+
+function render() {
+  if (isInitializing) {
+    app.innerHTML = `<main class="auth-shell"><section class="auth-card"><p>Loading...</p></section></main>`;
+    return;
+  }
+
+  if (!currentUser) {
+    renderAuthScreen(!supabase);
+    return;
+  }
+
+  renderTableScreen();
+}
+
+async function handleSession(session) {
+  const sessionUser = session && session.user ? session.user : null;
+
+  if (!sessionUser) {
+    currentUser = null;
+    authBusy = false;
+    authError = "";
+    saveStatus = "idle";
+    if (saveTimer) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    render();
+    return;
+  }
+
+  if (!isAllowedUser(sessionUser)) {
+    await supabase.auth.signOut();
+    authError = "This account is not allowed to access this app.";
+    return;
+  }
+
+  currentUser = sessionUser;
+  authBusy = false;
+  authError = "";
+  saveStatus = "idle";
+
+  try {
+    await loadRemoteState();
+  } catch (error) {
+    authError = `Could not load data from Supabase: ${error.message}`;
+  }
+
+  render();
+}
+
+async function initApp() {
+  loadThemePreference();
+
+  if (!supabase) {
+    isInitializing = false;
+    render();
+    return;
+  }
+
+  const { data } = await supabase.auth.getSession();
+  await handleSession(data.session);
+
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    await handleSession(session);
+  });
+
+  isInitializing = false;
+  render();
+}
+
+initApp();
