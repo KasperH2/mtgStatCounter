@@ -75,11 +75,13 @@ const state = {
 let isDarkMode = false;
 let activeEditor = null;
 let displayMode = "wins";
-let scoreMinGamesFilter = 0;
-let scoreMinAbsFilter = 0;
+let scoreMinGamesFilter = 5;
+let scoreMaxDiffFilter = 2;
 let gamesMinFilter = 0;
 let gamesMaxFilter = 9999;
 let sortMode = "none";
+let unsortedSnapshot = null;
+let highlightMode = "counters";
 let accountOpen = false;
 let highlightOpen = false;
 
@@ -293,24 +295,51 @@ function getDisplayValue(cellData) {
 }
 
 function getCellBackground(cellData) {
-  if (displayMode === "wins") {
-    const hasScoreFilter = scoreMinGamesFilter > 0 || scoreMinAbsFilter > 0;
-    if (!hasScoreFilter) {
-      return getScoreBackground(cellData.score);
-    }
-
-    const passScore = Math.abs(cellData.score) >= scoreMinAbsFilter;
+  if (highlightMode === "good") {
+    const passScore = Math.abs(cellData.score) <= scoreMaxDiffFilter;
     const passGames = cellData.games >= scoreMinGamesFilter;
-    return passScore && passGames ? getScoreBackground(cellData.score) : "var(--surface)";
+    return passScore && passGames ? "var(--heat-highlight)" : "var(--surface)";
   }
 
-  const hasRangeFilter = gamesMinFilter > 0 || gamesMaxFilter < 9999;
-  if (!hasRangeFilter) {
-    return "var(--surface)";
+  if (highlightMode === "counters") {
+    return displayMode === "wins" ? getScoreBackground(cellData.score) : "var(--surface)";
   }
 
-  const pass = cellData.games >= gamesMinFilter && cellData.games <= gamesMaxFilter;
-  return pass ? "var(--heat-highlight)" : "var(--surface)";
+  return "var(--surface)";
+}
+
+function toggleHighlightMode(mode) {
+  highlightMode = highlightMode === mode ? "none" : mode;
+  highlightOpen = true;
+  render();
+}
+
+function cloneMatrix(matrix) {
+  return matrix.map((row) => row.map((cell) => ({ score: cell.score, games: cell.games })));
+}
+
+function captureUnsortedSnapshot() {
+  if (sortMode !== "none" || unsortedSnapshot) return;
+  unsortedSnapshot = {
+    rowDecks: [...state.rowDecks],
+    columnDecks: [...state.columnDecks],
+    matrix: cloneMatrix(state.matrix)
+  };
+}
+
+function clearUnsortedSnapshot() {
+  unsortedSnapshot = null;
+}
+
+function restoreUnsortedSnapshot() {
+  if (!unsortedSnapshot) return false;
+
+  state.rowDecks = [...unsortedSnapshot.rowDecks];
+  state.columnDecks = [...unsortedSnapshot.columnDecks];
+  state.matrix = cloneMatrix(unsortedSnapshot.matrix);
+  clearUnsortedSnapshot();
+  activeEditor = null;
+  return true;
 }
 
 function autoSortByPerformance() {
@@ -332,6 +361,14 @@ function autoSortByPerformance() {
 }
 
 function sortByMostWins() {
+  if (sortMode === "wins") {
+    sortMode = "none";
+    restoreUnsortedSnapshot();
+    render();
+    return;
+  }
+
+  captureUnsortedSnapshot();
   autoSortByPerformance();
   sortMode = "wins";
   scheduleSave();
@@ -339,6 +376,14 @@ function sortByMostWins() {
 }
 
 function sortByMostPlayed() {
+  if (sortMode === "games") {
+    sortMode = "none";
+    restoreUnsortedSnapshot();
+    render();
+    return;
+  }
+
+  captureUnsortedSnapshot();
   const rowGameTotals = getRowGameTotals();
   const columnGameTotals = getColumnGameTotals();
 
@@ -366,13 +411,27 @@ function toggleDisplayMode() {
 }
 
 function setFilterValue(kind, value) {
+  const raw = String(value).trim();
+
+  if (kind === "scoreMaxDiff") {
+    if (raw === "") {
+      scoreMaxDiffFilter = 2;
+    } else {
+      const parsed = Number(raw);
+      if (Number.isNaN(parsed)) return;
+      scoreMaxDiffFilter = Math.max(0, Math.trunc(parsed));
+    }
+
+    highlightOpen = true;
+    render();
+    return;
+  }
+
   const parsed = Number(value);
   if (Number.isNaN(parsed)) return;
 
   if (kind === "scoreMinGames") {
     scoreMinGamesFilter = Math.max(0, Math.trunc(parsed));
-  } else if (kind === "scoreMinAbs") {
-    scoreMinAbsFilter = Math.max(0, Math.trunc(parsed));
   } else if (kind === "gamesMin") {
     gamesMinFilter = Math.max(0, Math.trunc(parsed));
   } else {
@@ -393,6 +452,11 @@ function updateDeckName(type, index, value) {
     state.columnDecks[index] = nextName;
   }
 
+  if (sortMode !== "none") {
+    sortMode = "none";
+    clearUnsortedSnapshot();
+  }
+
   scheduleSave();
   render();
 }
@@ -407,13 +471,20 @@ function nudgeCellValue(rowIndex, colIndex, key, delta) {
   }
 
   sortMode = "none";
+  clearUnsortedSnapshot();
   scheduleSave();
   render();
 }
 
 function setActiveEditor(rowIndex, colIndex) {
   const isSame = activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex;
-  activeEditor = isSame ? null : { row: rowIndex, col: colIndex };
+  activeEditor = isSame
+    ? null
+    : {
+        row: rowIndex,
+        col: colIndex,
+        revealGamesEditor: displayMode !== "games"
+      };
   render();
 }
 
@@ -435,6 +506,9 @@ function buildHeaderCell(name, type, index) {
 }
 
 function buildScoreCell(rowIndex, colIndex, cellData) {
+  const isActiveCell = activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex;
+  const shouldRevealGamesEditor = displayMode !== "games" || (isActiveCell && activeEditor.revealGamesEditor);
+
   const cell = document.createElement("td");
   cell.className = `score-cell ${scoreClass(cellData.score)}`;
   cell.title = `${state.rowDecks[rowIndex]} vs ${state.columnDecks[colIndex]} | Games played: ${cellData.games}`;
@@ -455,65 +529,97 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
   popover.className = "cell-popover";
   popover.addEventListener("click", (event) => event.stopPropagation());
 
-  const scoreRow = document.createElement("div");
-  scoreRow.className = "popover-row";
+  const title = document.createElement("p");
+  title.className = "editor-title";
+  title.textContent = `${state.rowDecks[rowIndex]} vs. ${state.columnDecks[colIndex]}`;
 
-  const gameRow = document.createElement("div");
-  gameRow.className = "popover-row";
+  const stats = document.createElement("div");
+  stats.className = "editor-stats";
+
+  const scoreStat = document.createElement("span");
+  scoreStat.className = "editor-stat-chip";
+  scoreStat.textContent = `Score: ${cellData.score}`;
+
+  const gamesStat = document.createElement("span");
+  gamesStat.className = "editor-stat-chip";
+  gamesStat.textContent = `Games: ${cellData.games}`;
+
+  stats.append(scoreStat, gamesStat);
+
+  let editorLabel = null;
+  if (displayMode === "wins" || shouldRevealGamesEditor) {
+    editorLabel = document.createElement("p");
+    editorLabel.className = "editor-mode-label";
+    if (displayMode === "wins") {
+      editorLabel.textContent = "Edit score";
+    } else {
+      editorLabel.classList.add("is-warning");
+      editorLabel.textContent = "Warning, you are editing number of games played";
+    }
+  }
+
+  const editorRow = document.createElement("div");
+  editorRow.className = "editor-row";
+
+  const revealGamesButton = document.createElement("button");
+  revealGamesButton.type = "button";
+  revealGamesButton.className = "editor-reveal-button";
+  revealGamesButton.textContent = "Edit no. of games played";
+  revealGamesButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    activeEditor = {
+      row: rowIndex,
+      col: colIndex,
+      revealGamesEditor: true
+    };
+    render();
+  });
 
   const minusButton = document.createElement("button");
   minusButton.type = "button";
-  minusButton.className = "side-button side-minus";
+  minusButton.className = "editor-button side-minus";
   minusButton.textContent = "-";
-  minusButton.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "score", -1));
+  minusButton.addEventListener("click", () =>
+    nudgeCellValue(rowIndex, colIndex, displayMode === "wins" ? "score" : "games", -1)
+  );
 
-  const scoreValue = document.createElement("span");
-  scoreValue.className = "popover-input";
-  scoreValue.textContent = String(cellData.score);
+  const editValue = document.createElement("span");
+  editValue.className = "editor-value";
+  editValue.textContent = String(displayMode === "wins" ? cellData.score : cellData.games);
 
   const plusButton = document.createElement("button");
   plusButton.type = "button";
-  plusButton.className = "side-button side-plus";
+  plusButton.className = "editor-button side-plus";
   plusButton.textContent = "+";
-  plusButton.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "score", 1));
-
-  const gamesLabel = document.createElement("span");
-  gamesLabel.className = "games-label";
-  gamesLabel.textContent = "G";
-
-  const gamesValue = document.createElement("span");
-  gamesValue.className = "popover-input";
-  gamesValue.textContent = String(cellData.games);
-
-  const gamesMinus = document.createElement("button");
-  gamesMinus.type = "button";
-  gamesMinus.className = "side-button games-button";
-  gamesMinus.textContent = "-";
-  gamesMinus.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "games", -1));
-
-  const gamesPlus = document.createElement("button");
-  gamesPlus.type = "button";
-  gamesPlus.className = "side-button games-button";
-  gamesPlus.textContent = "+";
-  gamesPlus.addEventListener("click", () => nudgeCellValue(rowIndex, colIndex, "games", 1));
+  plusButton.addEventListener("click", () =>
+    nudgeCellValue(rowIndex, colIndex, displayMode === "wins" ? "score" : "games", 1)
+  );
 
   const closeButton = document.createElement("button");
   closeButton.type = "button";
   closeButton.className = "popover-close";
-  closeButton.textContent = "x";
+  closeButton.textContent = "Close";
   closeButton.addEventListener("click", (event) => {
     event.stopPropagation();
     activeEditor = null;
     render();
   });
 
-  scoreRow.append(minusButton, scoreValue, plusButton);
-  gameRow.append(gamesMinus, gamesLabel, gamesValue, gamesPlus);
-  popover.append(closeButton, scoreRow, gameRow);
+  editorRow.append(minusButton, editValue, plusButton);
+  popover.append(closeButton, title, stats);
+  if (editorLabel) {
+    popover.append(editorLabel);
+  }
+  if (shouldRevealGamesEditor) {
+    popover.append(editorRow);
+  } else {
+    popover.append(revealGamesButton);
+  }
 
   shell.append(value);
 
-  if (activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex) {
+  if (isActiveCell) {
+    cell.classList.add("is-editing");
     shell.append(popover);
   }
 
@@ -530,18 +636,34 @@ function saveStatusLabel() {
 }
 
 function activeFilterLabel() {
-  if (displayMode === "wins") {
-    if (scoreMinGamesFilter > 0 || scoreMinAbsFilter > 0) {
-      return `Filter: Score | abs >= ${scoreMinAbsFilter}, games >= ${scoreMinGamesFilter}`;
-    }
-    return "Filter: Score | none";
+  if (highlightMode === "good") {
+    return `Good matchups | max diff <= ${scoreMaxDiffFilter}, games >= ${scoreMinGamesFilter}`;
   }
 
-  if (gamesMinFilter > 0 || gamesMaxFilter < 9999) {
-    return `Filter: Games range (${gamesMinFilter} to ${gamesMaxFilter})`;
+  if (highlightMode === "counters") {
+    return "Counters highlight";
   }
 
-  return "Filter: None";
+  return "Highlight: none";
+}
+
+function positionActiveEditorPopover() {
+  const popover = app.querySelector(".cell-popover");
+  const activeCell = app.querySelector(".score-cell.is-editing");
+  if (!popover || !activeCell) return;
+
+  const cellRect = activeCell.getBoundingClientRect();
+  const popRect = popover.getBoundingClientRect();
+  const margin = 10;
+
+  let left = cellRect.left + cellRect.width / 2 - popRect.width / 2;
+  let top = cellRect.top + cellRect.height / 2 - popRect.height / 2;
+
+  left = Math.max(margin, Math.min(left, window.innerWidth - popRect.width - margin));
+  top = Math.max(margin, Math.min(top, window.innerHeight - popRect.height - margin));
+
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
 }
 
 function renderAuthScreen(configError) {
@@ -616,7 +738,7 @@ function renderTableScreen() {
                     ${displayMode === "games" ? "Mode: # of games" : "Mode: Score"}
                   </button>
                   <button class="mode-toggle mode-highlight-main ${highlightOpen ? "active" : ""}" type="button" data-highlight-toggle>
-                    Highlight mode
+                    Highlight
                   </button>
                   <p class="view-mode-chip">${activeFilterLabel()}</p>
                   <div class="sort-mini-wrap">
@@ -643,25 +765,35 @@ function renderTableScreen() {
                     highlightOpen
                       ? `<div class="controls-popover highlight-popover" data-highlight-popover>
                           <section class="controls-section">
-                            <p class="controls-title">Highlight</p>
+                            <div class="controls-header">
+                              <p class="controls-title">Highlight</p>
+                              <button class="controls-close" type="button" data-highlight-close aria-label="Close highlight panel">X</button>
+                            </div>
+                            <div class="controls-actions two-col">
+                              <button class="mode-toggle mode-filter ${
+                                highlightMode === "good" ? "active" : ""
+                              }" type="button" data-highlight-good>
+                                Good matchups
+                              </button>
+                              <button class="mode-toggle mode-filter ${
+                                highlightMode === "counters" ? "active" : ""
+                              }" type="button" data-highlight-counters>
+                                Counters
+                              </button>
+                            </div>
                             ${
-                              displayMode === "wins"
+                              highlightMode === "good"
                                 ? `<div class="filter-wrap">
-                                    <label class="filter-field">Min score difference (abs) >=
-                                      <input type="number" min="0" value="${scoreMinAbsFilter}" data-filter-score-min-abs />
+                                    <label class="filter-field">Max score diff <=
+                                      <input type="number" min="0" value="${scoreMaxDiffFilter}" data-filter-score-max-diff />
                                     </label>
                                     <label class="filter-field">Min number of games >=
                                       <input type="number" min="0" value="${scoreMinGamesFilter}" data-filter-score-min-games />
                                     </label>
                                   </div>`
-                                : `<div class="filter-wrap">
-                                    <label class="filter-field">Min number of games >=
-                                      <input type="number" min="0" value="${gamesMinFilter}" data-filter-games-min />
-                                    </label>
-                                    <label class="filter-field">Max number of games <=
-                                      <input type="number" min="0" value="${gamesMaxFilter}" data-filter-games-max />
-                                    </label>
-                                  </div>`
+                                : highlightMode === "counters"
+                                  ? `<p class="subtle"></p>`
+                                  : `<p class="subtle">No highlight active</p>`
                             }
                           </section>
                         </div>`
@@ -763,6 +895,15 @@ function renderTableScreen() {
     highlightPopover.addEventListener("click", (event) => event.stopPropagation());
   }
 
+  const highlightCloseButton = app.querySelector("[data-highlight-close]");
+  if (highlightCloseButton) {
+    highlightCloseButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      highlightOpen = false;
+      render();
+    });
+  }
+
   const signOutButton = app.querySelector("[data-signout]");
   if (signOutButton) {
     signOutButton.addEventListener("click", async (event) => {
@@ -795,11 +936,27 @@ function renderTableScreen() {
     });
   }
 
-  const scoreMinAbsInput = app.querySelector("[data-filter-score-min-abs]");
-  if (scoreMinAbsInput) {
-    scoreMinAbsInput.addEventListener("change", (event) => {
+  const goodHighlightToggle = app.querySelector("[data-highlight-good]");
+  if (goodHighlightToggle) {
+    goodHighlightToggle.addEventListener("click", (event) => {
       event.stopPropagation();
-      setFilterValue("scoreMinAbs", event.target.value);
+      toggleHighlightMode("good");
+    });
+  }
+
+  const countersHighlightToggle = app.querySelector("[data-highlight-counters]");
+  if (countersHighlightToggle) {
+    countersHighlightToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleHighlightMode("counters");
+    });
+  }
+
+  const scoreMaxDiffInput = app.querySelector("[data-filter-score-max-diff]");
+  if (scoreMaxDiffInput) {
+    scoreMaxDiffInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setFilterValue("scoreMaxDiff", event.target.value);
     });
   }
 
@@ -827,6 +984,19 @@ function renderTableScreen() {
     });
   }
 
+  const gridWrap = app.querySelector(".grid-wrap");
+  if (gridWrap) {
+    gridWrap.addEventListener(
+      "scroll",
+      () => {
+        if (activeEditor) {
+          positionActiveEditorPopover();
+        }
+      },
+      { passive: true }
+    );
+  }
+
   const shell = app.querySelector(".page-shell");
   if (shell) {
     shell.addEventListener("click", (event) => {
@@ -845,6 +1015,10 @@ function renderTableScreen() {
       }
       render();
     });
+  }
+
+  if (activeEditor) {
+    positionActiveEditorPopover();
   }
 }
 
@@ -888,6 +1062,7 @@ async function handleSession(session) {
   authBusy = false;
   authError = "";
   saveStatus = "idle";
+  clearUnsortedSnapshot();
 
   try {
     await loadRemoteState();

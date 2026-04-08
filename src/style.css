@@ -325,9 +325,13 @@ body {
   border-radius: 7px;
   background: var(--chip-bg);
   color: var(--chip-ink);
-  font-size: 0.56rem;
-  line-height: 1.15;
-  padding: 0.12rem 0.14rem;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  padding: 0.28rem 0.26rem;
+  min-height: 2.15rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
 }
 
@@ -411,6 +415,27 @@ body {
   letter-spacing: 0.04em;
   color: var(--muted);
   text-align: left;
+}
+
+.controls-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.3rem;
+}
+
+.controls-close {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 1.6rem;
+  height: 1.4rem;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--ink);
 }
 
 .controls-actions {
@@ -663,6 +688,7 @@ body {
   min-width: 42px;
   height: 42px;
   min-height: 42px;
+  overflow: visible;
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
 
@@ -672,6 +698,11 @@ body {
   z-index: 2;
 }
 
+.score-cell.is-editing,
+.score-cell.is-editing:hover {
+  z-index: 1200;
+}
+
 .score-shell {
   position: relative;
   display: flex;
@@ -679,6 +710,7 @@ body {
   justify-content: center;
   width: 100%;
   height: 100%;
+  overflow: visible;
 }
 
 .score-value {
@@ -690,18 +722,18 @@ body {
 }
 
 .cell-popover {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: 116px;
-  min-height: 76px;
-  z-index: 9;
+  position: fixed;
+  left: 0;
+  top: 0;
+  transform: none;
+  width: min(320px, 90vw);
+  min-height: 196px;
+  z-index: 1400;
   display: grid;
-  grid-template-rows: auto 1fr 1fr;
-  gap: 0.22rem;
-  align-content: center;
-  padding: 0.42rem;
+  grid-template-rows: auto auto auto auto auto;
+  gap: 0.42rem;
+  align-content: start;
+  padding: 0.65rem;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: linear-gradient(160deg, var(--surface), var(--surface-2));
@@ -710,67 +742,116 @@ body {
 
 .popover-close {
   border: 1px solid var(--border);
-  border-radius: 4px;
-  width: 18px;
-  height: 18px;
+  border-radius: 7px;
+  width: 60px;
+  height: 34px;
   margin-left: auto;
-  line-height: 14px;
-  font-size: 0.7rem;
+  line-height: 1;
+  font-size: 0.78rem;
+  font-weight: 700;
   padding: 0;
   cursor: pointer;
   background: var(--surface-2);
   color: var(--ink);
 }
 
-.popover-row {
-  display: grid;
-  align-items: center;
-  gap: 0.12rem;
-}
-
-.popover-row:first-of-type {
-  grid-template-columns: 22px 1fr 22px;
-}
-
-.popover-row:last-of-type {
-  grid-template-columns: 22px 14px 1fr 22px;
-}
-
-.popover-input {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  text-align: center;
-  padding: 0.1rem 0.05rem;
-  font-family: "Archivo", sans-serif;
+.editor-title {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.2;
   font-weight: 700;
+  text-align: center;
+}
+
+.editor-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+}
+
+.editor-stat-chip {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.36rem 0.32rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-align: center;
   background: var(--surface);
   color: var(--ink);
-  font-size: 0.8rem;
 }
 
-.side-button {
-  border: 1px solid var(--border);
-  border-radius: 6px;
+.editor-mode-label {
+  margin: 0;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-align: left;
+}
+
+.editor-mode-label.is-warning {
+  color: #b42318;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+:root[data-theme="dark"] .editor-mode-label.is-warning {
+  color: #ff8f8f;
+}
+
+.editor-row {
+  display: grid;
+  grid-template-columns: 54px 1fr 54px;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.editor-value {
   width: 100%;
-  height: 22px;
-  line-height: 18px;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  text-align: center;
+  padding: 0.46rem 0.18rem;
+  font-family: "Archivo", sans-serif;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 1.18rem;
+}
+
+.editor-button {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  min-height: 52px;
+  line-height: 1;
   padding: 0;
-  font-size: 0.95rem;
+  font-size: 1.6rem;
   font-weight: 700;
   cursor: pointer;
   background: var(--surface-2);
   color: var(--ink);
 }
 
-.games-label {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.68rem;
+.editor-reveal-button {
+  border: 1px solid var(--ctrl-view-border);
+  border-radius: 10px;
+  width: 100%;
+  min-height: 52px;
+  padding: 0.55rem 0.6rem;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 0.84rem;
   font-weight: 700;
-  color: var(--ink);
+  line-height: 1.2;
+  cursor: pointer;
+  background: var(--ctrl-view-bg);
+  color: var(--ctrl-view-ink);
 }
 
 .side-minus {
@@ -852,7 +933,9 @@ body {
   }
 
   .view-mode-chip {
-    font-size: 0.48rem;
+    font-size: 0.6rem;
+    min-height: 1.85rem;
+    padding: 0.22rem 0.2rem;
   }
 
   .controls-popover {
@@ -885,19 +968,26 @@ body {
   }
 
   .cell-popover {
-    width: 104px;
-    min-height: 68px;
-    padding: 0.34rem;
+    width: min(300px, 90vw);
+    min-height: 182px;
+    padding: 0.58rem;
   }
 
-  .popover-input {
+  .editor-title {
+    font-size: 0.78rem;
+  }
+
+  .editor-stat-chip {
     font-size: 0.74rem;
   }
 
-  .side-button {
-    height: 19px;
-    line-height: 15px;
-    font-size: 0.8rem;
+  .editor-value {
+    font-size: 1.06rem;
+  }
+
+  .editor-button {
+    min-height: 48px;
+    font-size: 1.45rem;
   }
 
   .sum-cell,
@@ -934,19 +1024,26 @@ body {
   }
 
   .cell-popover {
-    width: 92px;
-    min-height: 62px;
-    padding: 0.28rem;
+    width: min(280px, 92vw);
+    min-height: 176px;
+    padding: 0.52rem;
   }
 
-  .popover-input {
-    font-size: 0.68rem;
+  .editor-title {
+    font-size: 0.74rem;
   }
 
-  .side-button {
-    height: 17px;
-    line-height: 13px;
-    font-size: 0.72rem;
+  .editor-stat-chip {
+    font-size: 0.7rem;
+  }
+
+  .editor-value {
+    font-size: 0.96rem;
+  }
+
+  .editor-button {
+    min-height: 42px;
+    font-size: 1.26rem;
   }
 
   .column-input {
@@ -960,8 +1057,9 @@ body {
   }
 
   .view-mode-chip {
-    font-size: 0.42rem;
-    padding: 0.1rem 0.14rem;
+    font-size: 0.54rem;
+    min-height: 1.7rem;
+    padding: 0.16rem 0.16rem;
   }
 
   .controls-popover {
