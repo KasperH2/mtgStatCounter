@@ -307,7 +307,7 @@ body {
 
 .matchup-table tbody tr:nth-child(even) > th.deck-heading,
 .matchup-table tbody tr:nth-child(even) > td {
-  background: var(--stripe-row);
+  background: var(--stripe-row) !important;
 }
 
 .matchup-table tbody tr > td:nth-child(odd) {
@@ -316,6 +316,10 @@ body {
 
 .matchup-table tbody tr:nth-child(even) > td:nth-child(odd) {
   background: var(--stripe-cross);
+}
+
+.matchup-table thead tr > th.deck-heading:nth-child(odd) {
+  background: var(--stripe-col) !important;
 }
 
 .corner-cell,
@@ -335,9 +339,11 @@ body {
 
 .corner-cell-inner {
   display: grid;
-  gap: 0.06rem;
-  justify-items: center;
-  align-items: center;
+  grid-template-rows: auto auto auto minmax(2.4rem, 1fr) auto;
+  gap: 0.12rem;
+  justify-items: stretch;
+  align-items: stretch;
+  align-content: stretch;
   height: 100%;
   width: 100%;
 }
@@ -361,14 +367,14 @@ body {
 
 .mode-account-small {
   min-width: 0;
-  font-size: 0.58rem;
-  padding: 0.14rem 0.18rem;
+  font-size: 0.64rem;
+  padding: 0.2rem 0.2rem;
 }
 
 .mode-theme-small {
   min-width: 0;
-  font-size: 0.58rem;
-  padding: 0.14rem 0.18rem;
+  font-size: 0.64rem;
+  padding: 0.2rem 0.2rem;
   border-radius: 8px;
 }
 
@@ -379,10 +385,10 @@ body {
   border-radius: 7px;
   background: var(--chip-bg);
   color: var(--chip-ink);
-  font-size: 0.68rem;
+  font-size: 0.74rem;
   line-height: 1.25;
-  padding: 0.28rem 0.26rem;
-  min-height: 2.15rem;
+  padding: 0.34rem 0.3rem;
+  min-height: 2.4rem;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -397,14 +403,14 @@ body {
 }
 
 .sort-mini {
-  width: 1.22rem;
-  height: 1.22rem;
+  width: 1.36rem;
+  height: 1.36rem;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--ink);
   font-family: "Space Grotesk", sans-serif;
-  font-size: 0.62rem;
+  font-size: 0.68rem;
   font-weight: 800;
   line-height: 1;
   cursor: pointer;
@@ -418,16 +424,16 @@ body {
 
 .mode-main {
   width: 100%;
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   font-weight: 800;
-  padding: 0.14rem 0.22rem;
+  padding: 0.24rem 0.24rem;
 }
 
 .mode-highlight-main {
   width: 100%;
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   font-weight: 800;
-  padding: 0.14rem 0.22rem;
+  padding: 0.24rem 0.24rem;
 }
 
 .controls-popover {
@@ -689,7 +695,7 @@ body {
 }
 
 .deck-heading {
-  background: var(--surface-2) !important;
+  background: var(--surface-2);
 }
 
 .deck-input {

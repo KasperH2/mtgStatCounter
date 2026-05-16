@@ -1051,7 +1051,6 @@ function renderTableScreen() {
             <thead>
               <tr>
                 <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ``}"><div class="corner-cell-inner">
-                  <span>Row \\ Column</span>
                   <div class="top-mini-actions">
                     <button class="mode-toggle mode-account-small ${accountOpen ? "active" : ""}" type="button" data-account-toggle>
                       Account
