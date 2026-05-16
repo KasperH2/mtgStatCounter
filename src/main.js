@@ -101,6 +101,8 @@ let cellSyncRetryCount = 0;
 let pendingCellOps = [];
 let realtimeChannel = null;
 let remoteReloadTimer = null;
+let gridScrollLeft = 0;
+let gridScrollTop = 0;
 
 const MAX_FULL_SAVE_RETRIES = 5;
 const MAX_CELL_SYNC_RETRIES = 8;
@@ -992,6 +994,20 @@ function positionActiveEditorPopover() {
   popover.style.top = `${Math.round(top)}px`;
 }
 
+function captureGridScrollPosition() {
+  const gridWrap = app.querySelector(".grid-wrap");
+  if (!gridWrap) return;
+  gridScrollLeft = gridWrap.scrollLeft;
+  gridScrollTop = gridWrap.scrollTop;
+}
+
+function restoreGridScrollPosition() {
+  const gridWrap = app.querySelector(".grid-wrap");
+  if (!gridWrap) return;
+  gridWrap.scrollLeft = gridScrollLeft;
+  gridWrap.scrollTop = gridScrollTop;
+}
+
 function renderAuthScreen(configError) {
   app.innerHTML = `
     <main class="auth-shell">
@@ -1311,9 +1327,12 @@ function renderTableScreen() {
 
   const gridWrap = app.querySelector(".grid-wrap");
   if (gridWrap) {
+    restoreGridScrollPosition();
     gridWrap.addEventListener(
       "scroll",
       () => {
+        gridScrollLeft = gridWrap.scrollLeft;
+        gridScrollTop = gridWrap.scrollTop;
         if (activeEditor) {
           positionActiveEditorPopover();
         }
@@ -1348,6 +1367,8 @@ function renderTableScreen() {
 }
 
 function render() {
+  captureGridScrollPosition();
+
   if (isInitializing) {
     app.innerHTML = `<main class="auth-shell"><section class="auth-card"><p>Loading...</p></section></main>`;
     return;

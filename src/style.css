@@ -305,9 +305,12 @@ body {
   background: var(--surface-2);
 }
 
-.matchup-table tbody tr:nth-child(even) > th.deck-heading,
-.matchup-table tbody tr:nth-child(even) > td {
+.matchup-table tbody tr:nth-child(even) > th.deck-heading {
   background: var(--stripe-row) !important;
+}
+
+.matchup-table tbody tr:nth-child(even) > td {
+  background: var(--stripe-row);
 }
 
 .matchup-table tbody tr > td:nth-child(odd) {
