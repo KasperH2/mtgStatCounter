@@ -1039,7 +1039,7 @@ function renderTableScreen() {
           <table class="matchup-table">
             <thead>
               <tr>
-                <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ""}">
+                <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ""}" rowspan="2">
                   <span>Row \\ Column</span>
                   <div class="top-mini-actions">
                     <button class="mode-toggle mode-account-small ${accountOpen ? "active" : ""}" type="button" data-account-toggle>
@@ -1115,6 +1115,8 @@ function renderTableScreen() {
                       : ""
                   }
                 </th>
+              </tr>
+              <tr>
                 ${state.columnDecks.map((_, index) => `<th data-col="${index}"></th>`).join("")}
                 <th class="sum-col">Total</th>
               </tr>

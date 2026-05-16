@@ -76,7 +76,8 @@ body {
   font-family: "Archivo", "Segoe UI", sans-serif;
   color: var(--ink);
   background: var(--bg);
-  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: hidden;
 }
 
 .auth-shell {
@@ -199,6 +200,7 @@ body {
 }
 
 .panel {
+  min-width: 0;
   border-radius: 14px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -216,8 +218,9 @@ body {
 }
 
 .grid-wrap {
-  overflow-x: auto;
-  overflow-y: visible;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  height: 100dvh;
   border-radius: 12px;
 }
 
@@ -245,7 +248,7 @@ body {
   border-top-left-radius: 12px;
 }
 
-.matchup-table thead tr:first-child th:last-child {
+.matchup-table thead tr:last-child th:last-child {
   border-top-right-radius: 12px;
 }
 
@@ -264,13 +267,13 @@ body {
   background: var(--surface-2);
 }
 
-.matchup-table :is(thead, tbody, tfoot) tr > :first-child {
+.matchup-table :is(tbody, tfoot) tr > :first-child {
   position: sticky;
   left: 0;
   z-index: 6;
 }
 
-.matchup-table thead tr > :first-child {
+.matchup-table thead tr:first-child > :first-child {
   top: 0;
   left: 0;
   z-index: 8;
@@ -1019,11 +1022,7 @@ body {
 
 @media (max-width: 900px) {
   .grid-wrap {
-    position: relative;
-    overflow: auto;
-    max-height: calc(100vh - env(safe-area-inset-top, 0px) - var(--mobile-grid-offset));
-    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - var(--mobile-grid-offset));
-    -webkit-overflow-scrolling: touch;
+    height: calc(100dvh - env(safe-area-inset-top, 0px) - var(--mobile-grid-offset));
   }
 
   .page-shell {
