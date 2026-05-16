@@ -30,6 +30,7 @@
   --chip-bg: #f0f4f8;
   --chip-border: #a8b6c6;
   --chip-ink: #2c3f52;
+  --mobile-grid-offset: 3.75rem;
 }
 
 :root[data-theme="dark"] {
@@ -263,9 +264,24 @@ body {
   background: var(--surface-2);
 }
 
-.matchup-table tbody th {
+.matchup-table :is(thead, tbody, tfoot) tr > :first-child {
   position: sticky;
   left: 0;
+  z-index: 6;
+}
+
+.matchup-table thead tr > :first-child {
+  top: 0;
+  left: 0;
+  z-index: 8;
+}
+
+.matchup-table tbody tr > :first-child,
+.matchup-table tfoot tr > :first-child {
+  background: var(--surface-2);
+}
+
+.matchup-table tbody th {
   z-index: 4;
   background: var(--surface-2);
 }
@@ -280,7 +296,8 @@ body {
 }
 
 .corner-cell {
-  position: relative;
+  position: sticky;
+  left: 0;
   display: grid;
   gap: 0.06rem;
   justify-items: center;
@@ -1001,6 +1018,14 @@ body {
 }
 
 @media (max-width: 900px) {
+  .grid-wrap {
+    position: relative;
+    overflow: auto;
+    max-height: calc(100vh - env(safe-area-inset-top, 0px) - var(--mobile-grid-offset));
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - var(--mobile-grid-offset));
+    -webkit-overflow-scrolling: touch;
+  }
+
   .page-shell {
     width: min(99vw, 1800px);
     margin: 0 auto;

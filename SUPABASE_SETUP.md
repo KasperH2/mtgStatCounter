@@ -147,7 +147,11 @@ end $$;
 
 6. In `.env`, set `VITE_ALLOWED_EMAILS` to exactly those two emails.
 
-7. Run:
+7. Enable Realtime for both tables:
+- Database -> Replication -> toggle on `public.matchup_cells`.
+- Database -> Replication -> toggle on `public.deck_layout`.
+
+8. Run:
 
 ```bash
 npm install

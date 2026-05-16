@@ -62,7 +62,7 @@ const initialState = {
 
 function makeDefaultMatrix() {
   return initialState.cells.map((row) =>
-    row.map((score) => ({ score, games: Math.abs(score) }))
+    row.map((score) => ({ score, games: Math.abs(score), updatedAt: null }))
   );
 }
 
@@ -91,6 +91,129 @@ let authError = "";
 let authBusy = false;
 let saveStatus = "idle";
 let saveTimer = null;
+let saveInFlight = false;
+let saveQueued = false;
+let saveRetryTimer = null;
+let fullSaveRetryCount = 0;
+let cellSyncInFlight = false;
+let cellSyncRetryTimer = null;
+let cellSyncRetryCount = 0;
+let pendingCellOps = [];
+let realtimeChannel = null;
+let remoteReloadTimer = null;
+
+const MAX_FULL_SAVE_RETRIES = 5;
+const MAX_CELL_SYNC_RETRIES = 8;
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function clearSaveRetryTimer() {
+  if (saveRetryTimer) {
+    window.clearTimeout(saveRetryTimer);
+    saveRetryTimer = null;
+  }
+}
+
+function clearCellSyncRetryTimer() {
+  if (cellSyncRetryTimer) {
+    window.clearTimeout(cellSyncRetryTimer);
+    cellSyncRetryTimer = null;
+  }
+}
+
+function scheduleSavedIndicatorReset() {
+  window.setTimeout(() => {
+    if (saveStatus === "saved") {
+      saveStatus = "idle";
+      render();
+    }
+  }, 1200);
+}
+
+function getCellIndexesByDeckNames(rowDeck, columnDeck) {
+  const rowIndex = state.rowDecks.indexOf(rowDeck);
+  const colIndex = state.columnDecks.indexOf(columnDeck);
+  if (rowIndex === -1 || colIndex === -1) return null;
+  return { rowIndex, colIndex };
+}
+
+function hasPendingCellOp(rowDeck, columnDeck) {
+  return pendingCellOps.some((op) => op.rowDeck === rowDeck && op.columnDeck === columnDeck);
+}
+
+function applyRemoteCellState(remoteCell) {
+  const indexes = getCellIndexesByDeckNames(String(remoteCell.row_deck), String(remoteCell.column_deck));
+  if (!indexes) return;
+
+  const { rowIndex, colIndex } = indexes;
+  state.matrix[rowIndex][colIndex] = {
+    score: Math.trunc(Number(remoteCell.score || 0)),
+    games: Math.max(0, Math.trunc(Number(remoteCell.games || 0))),
+    updatedAt: remoteCell.updated_at || state.matrix[rowIndex][colIndex].updatedAt || null
+  };
+}
+
+function clearRealtimeSubscription() {
+  if (remoteReloadTimer) {
+    window.clearTimeout(remoteReloadTimer);
+    remoteReloadTimer = null;
+  }
+
+  if (realtimeChannel && supabase) {
+    supabase.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+}
+
+function scheduleRemoteReload() {
+  if (!currentUser || !supabase) return;
+
+  if (remoteReloadTimer) {
+    window.clearTimeout(remoteReloadTimer);
+  }
+
+  remoteReloadTimer = window.setTimeout(async () => {
+    remoteReloadTimer = null;
+
+    if (saveInFlight || cellSyncInFlight || pendingCellOps.length || saveTimer) {
+      scheduleRemoteReload();
+      return;
+    }
+
+    try {
+      await loadRemoteState();
+      render();
+    } catch {
+      // Ignore transient reload errors; next realtime event or save will resync.
+    }
+  }, 400);
+}
+
+function setupRealtimeSubscription() {
+  if (!supabase || !currentUser) return;
+
+  clearRealtimeSubscription();
+
+  realtimeChannel = supabase
+    .channel(`matchup-live-${currentUser.id}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "matchup_cells" }, (payload) => {
+      const row = payload.new;
+      if (!row) return;
+      if (row.updated_by === currentUser.id) return;
+      if (hasPendingCellOp(String(row.row_deck), String(row.column_deck))) return;
+
+      applyRemoteCellState(row);
+      render();
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "deck_layout" }, (payload) => {
+      const row = payload.new || payload.old;
+      if (row && row.updated_by === currentUser.id) return;
+      scheduleRemoteReload();
+    })
+    .subscribe();
+}
 
 function loadThemePreference() {
   const saved = window.localStorage.getItem("mtg-theme");
@@ -124,24 +247,30 @@ function isAllowedUser(user) {
 }
 
 function deckLayoutRows() {
+  const nowIso = new Date().toISOString();
+
   const rowRows = state.rowDecks.map((deckName, position) => ({
     axis: "row",
     position,
     deck_name: deckName,
-    updated_by: currentUser.id
+    updated_by: currentUser.id,
+    updated_at: nowIso
   }));
 
   const columnRows = state.columnDecks.map((deckName, position) => ({
     axis: "column",
     position,
     deck_name: deckName,
-    updated_by: currentUser.id
+    updated_by: currentUser.id,
+    updated_at: nowIso
   }));
 
   return [...rowRows, ...columnRows];
 }
 
 function matchupRows() {
+  const nowIso = new Date().toISOString();
+
   return state.rowDecks.flatMap((rowDeck, rowIndex) =>
     state.columnDecks.map((columnDeck, colIndex) => {
       const cell = state.matrix[rowIndex][colIndex];
@@ -150,7 +279,8 @@ function matchupRows() {
         column_deck: columnDeck,
         score: Math.trunc(Number(cell.score || 0)),
         games: Math.max(0, Math.trunc(Number(cell.games || 0))),
-        updated_by: currentUser.id
+        updated_by: currentUser.id,
+        updated_at: nowIso
       };
     })
   );
@@ -158,8 +288,11 @@ function matchupRows() {
 
 async function loadRemoteState() {
   const [{ data: deckData, error: deckError }, { data: cellData, error: cellError }] = await Promise.all([
-    supabase.from("deck_layout").select("axis, position, deck_name").order("position", { ascending: true }),
-    supabase.from("matchup_cells").select("row_deck, column_deck, score, games")
+    supabase
+      .from("deck_layout")
+      .select("axis, position, deck_name, updated_at")
+      .order("position", { ascending: true }),
+    supabase.from("matchup_cells").select("row_deck, column_deck, score, games, updated_at")
   ]);
 
   if (deckError) throw deckError;
@@ -180,13 +313,14 @@ async function loadRemoteState() {
     return;
   }
 
-  const matrix = rowDecks.map(() => columnDecks.map(() => ({ score: 0, games: 0 })));
+  const matrix = rowDecks.map(() => columnDecks.map(() => ({ score: 0, games: 0, updatedAt: null })));
   const cellMap = new Map(
     (cellData || []).map((cell) => [
       `${String(cell.row_deck)}__${String(cell.column_deck)}`,
       {
         score: Math.trunc(Number(cell.score || 0)),
-        games: Math.max(0, Math.trunc(Number(cell.games || 0)))
+        games: Math.max(0, Math.trunc(Number(cell.games || 0))),
+        updatedAt: cell.updated_at || null
       }
     ])
   );
@@ -208,36 +342,71 @@ async function loadRemoteState() {
 async function persistRemoteState(successStatus = "saved") {
   if (!supabase || !currentUser) return;
 
+  if (saveInFlight) {
+    saveQueued = true;
+    return;
+  }
+
+  saveInFlight = true;
   saveStatus = "saving";
   render();
 
-  const { error: deckError } = await supabase.from("deck_layout").upsert(deckLayoutRows(), {
-    onConflict: "axis,position"
-  });
-  if (deckError) {
+  clearSaveRetryTimer();
+
+  const maxAttempts = Math.max(1, MAX_FULL_SAVE_RETRIES - fullSaveRetryCount);
+  let saveError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const { error: deckError } = await supabase.from("deck_layout").upsert(deckLayoutRows(), {
+      onConflict: "axis,position"
+    });
+
+    if (deckError) {
+      saveError = deckError;
+    } else {
+      const { error: cellError } = await supabase.from("matchup_cells").upsert(matchupRows(), {
+        onConflict: "row_deck,column_deck"
+      });
+      saveError = cellError || null;
+    }
+
+    if (!saveError) break;
+    await wait(Math.min(1800, 260 * 2 ** (attempt - 1)));
+  }
+
+  saveInFlight = false;
+
+  if (saveError) {
+    fullSaveRetryCount = Math.min(MAX_FULL_SAVE_RETRIES, fullSaveRetryCount + 1);
     saveStatus = "error";
     render();
+
+    if (!saveRetryTimer) {
+      const delayMs = Math.min(7000, 600 * 2 ** (fullSaveRetryCount - 1));
+      saveRetryTimer = window.setTimeout(() => {
+        saveRetryTimer = null;
+        persistRemoteState("saved");
+      }, delayMs);
+    }
+
+    if (saveQueued) {
+      saveQueued = false;
+      persistRemoteState("saved");
+    }
+
     return;
   }
 
-  const { error: cellError } = await supabase.from("matchup_cells").upsert(matchupRows(), {
-    onConflict: "row_deck,column_deck"
-  });
-  if (cellError) {
-    saveStatus = "error";
-    render();
-    return;
-  }
+  fullSaveRetryCount = 0;
 
   saveStatus = successStatus;
   render();
+  scheduleSavedIndicatorReset();
 
-  window.setTimeout(() => {
-    if (saveStatus === "saved") {
-      saveStatus = "idle";
-      render();
-    }
-  }, 1200);
+  if (saveQueued) {
+    saveQueued = false;
+    persistRemoteState("saved");
+  }
 }
 
 function scheduleSave() {
@@ -245,6 +414,8 @@ function scheduleSave() {
 
   saveStatus = "pending";
   render();
+
+  clearSaveRetryTimer();
 
   if (saveTimer) {
     window.clearTimeout(saveTimer);
@@ -254,6 +425,142 @@ function scheduleSave() {
     saveTimer = null;
     persistRemoteState("saved");
   }, 1000);
+}
+
+function queueCellSyncOperation(rowDeck, columnDeck, scoreDelta, gamesDelta) {
+  if (!currentUser || !supabase) return;
+
+  pendingCellOps.push({
+    rowDeck,
+    columnDeck,
+    scoreDelta: Math.trunc(Number(scoreDelta || 0)),
+    gamesDelta: Math.trunc(Number(gamesDelta || 0))
+  });
+
+  saveStatus = "pending";
+  render();
+  processCellSyncQueue();
+}
+
+async function applyCellDeltaWithOptimisticLock(op) {
+  for (let attempt = 1; attempt <= MAX_CELL_SYNC_RETRIES; attempt += 1) {
+    const { data: currentRows, error: readError } = await supabase
+      .from("matchup_cells")
+      .select("score, games, updated_at")
+      .eq("row_deck", op.rowDeck)
+      .eq("column_deck", op.columnDeck)
+      .limit(1);
+
+    if (readError) {
+      await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
+      continue;
+    }
+
+    const current = (currentRows || [])[0] || null;
+    const nowIso = new Date().toISOString();
+
+    if (!current) {
+      const { error: insertError, data: insertedRows } = await supabase
+        .from("matchup_cells")
+        .upsert(
+          {
+            row_deck: op.rowDeck,
+            column_deck: op.columnDeck,
+            score: op.scoreDelta,
+            games: Math.max(0, op.gamesDelta),
+            updated_by: currentUser.id,
+            updated_at: nowIso
+          },
+          { onConflict: "row_deck,column_deck" }
+        )
+        .select("row_deck, column_deck, score, games, updated_at")
+        .limit(1);
+
+      if (insertError) {
+        await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
+        continue;
+      }
+
+      const inserted = (insertedRows || [])[0] || null;
+      if (inserted) {
+        applyRemoteCellState(inserted);
+        return true;
+      }
+
+      await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
+      continue;
+    }
+
+    const nextScore = Math.trunc(Number(current.score || 0)) + op.scoreDelta;
+    const nextGames = Math.max(0, Math.trunc(Number(current.games || 0)) + op.gamesDelta);
+
+    const { data: updatedRows, error: updateError } = await supabase
+      .from("matchup_cells")
+      .update({
+        score: nextScore,
+        games: nextGames,
+        updated_by: currentUser.id,
+        updated_at: nowIso
+      })
+      .eq("row_deck", op.rowDeck)
+      .eq("column_deck", op.columnDeck)
+      .eq("updated_at", current.updated_at)
+      .select("row_deck, column_deck, score, games, updated_at")
+      .limit(1);
+
+    if (updateError) {
+      await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
+      continue;
+    }
+
+    if ((updatedRows || []).length) {
+      applyRemoteCellState(updatedRows[0]);
+      return true;
+    }
+
+    // Another user updated first; read latest and re-apply delta.
+  }
+
+  return false;
+}
+
+async function processCellSyncQueue() {
+  if (cellSyncInFlight || !pendingCellOps.length || !supabase || !currentUser) return;
+
+  cellSyncInFlight = true;
+  clearCellSyncRetryTimer();
+  saveStatus = "saving";
+  render();
+
+  while (pendingCellOps.length) {
+    const currentOp = pendingCellOps[0];
+    const success = await applyCellDeltaWithOptimisticLock(currentOp);
+
+    if (!success) {
+      cellSyncInFlight = false;
+      cellSyncRetryCount = Math.min(MAX_CELL_SYNC_RETRIES, cellSyncRetryCount + 1);
+      saveStatus = "error";
+      render();
+
+      if (!cellSyncRetryTimer) {
+        const delayMs = Math.min(6000, 500 * 2 ** (cellSyncRetryCount - 1));
+        cellSyncRetryTimer = window.setTimeout(() => {
+          cellSyncRetryTimer = null;
+          processCellSyncQueue();
+        }, delayMs);
+      }
+
+      return;
+    }
+
+    pendingCellOps.shift();
+  }
+
+  cellSyncInFlight = false;
+  cellSyncRetryCount = 0;
+  saveStatus = "saved";
+  render();
+  scheduleSavedIndicatorReset();
 }
 
 function getRowTotals() {
@@ -315,7 +622,9 @@ function toggleHighlightMode(mode) {
 }
 
 function cloneMatrix(matrix) {
-  return matrix.map((row) => row.map((cell) => ({ score: cell.score, games: cell.games })));
+  return matrix.map((row) =>
+    row.map((cell) => ({ score: cell.score, games: cell.games, updatedAt: cell.updatedAt || null }))
+  );
 }
 
 function captureUnsortedSnapshot() {
@@ -371,7 +680,6 @@ function sortByMostWins() {
   captureUnsortedSnapshot();
   autoSortByPerformance();
   sortMode = "wins";
-  scheduleSave();
   render();
 }
 
@@ -400,7 +708,6 @@ function sortByMostPlayed() {
 
   activeEditor = null;
   sortMode = "games";
-  scheduleSave();
   render();
 }
 
@@ -463,16 +770,24 @@ function updateDeckName(type, index, value) {
 
 function nudgeCellValue(rowIndex, colIndex, key, delta) {
   const cell = state.matrix[rowIndex][colIndex];
+  const rowDeck = state.rowDecks[rowIndex];
+  const columnDeck = state.columnDecks[colIndex];
+
   if (key === "score") {
     cell.score += delta;
     cell.games += 1;
+    queueCellSyncOperation(rowDeck, columnDeck, delta, 1);
   } else {
+    const previousGames = cell.games;
     cell.games = Math.max(0, cell.games + delta);
+    const effectiveDelta = cell.games - previousGames;
+    if (effectiveDelta !== 0) {
+      queueCellSyncOperation(rowDeck, columnDeck, 0, effectiveDelta);
+    }
   }
 
   sortMode = "none";
   clearUnsortedSnapshot();
-  scheduleSave();
   render();
 }
 
@@ -1040,10 +1355,19 @@ async function handleSession(session) {
   const sessionUser = session && session.user ? session.user : null;
 
   if (!sessionUser) {
+    clearRealtimeSubscription();
+    clearSaveRetryTimer();
+    clearCellSyncRetryTimer();
     currentUser = null;
     authBusy = false;
     authError = "";
     saveStatus = "idle";
+    fullSaveRetryCount = 0;
+    cellSyncRetryCount = 0;
+    saveInFlight = false;
+    saveQueued = false;
+    cellSyncInFlight = false;
+    pendingCellOps = [];
     if (saveTimer) {
       window.clearTimeout(saveTimer);
       saveTimer = null;
@@ -1062,10 +1386,19 @@ async function handleSession(session) {
   authBusy = false;
   authError = "";
   saveStatus = "idle";
+  fullSaveRetryCount = 0;
+  cellSyncRetryCount = 0;
+  saveInFlight = false;
+  saveQueued = false;
+  cellSyncInFlight = false;
+  pendingCellOps = [];
+  clearSaveRetryTimer();
+  clearCellSyncRetryTimer();
   clearUnsortedSnapshot();
 
   try {
     await loadRemoteState();
+    setupRealtimeSubscription();
   } catch (error) {
     authError = `Could not load data from Supabase: ${error.message}`;
   }
