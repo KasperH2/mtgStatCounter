@@ -594,7 +594,7 @@ function getScoreBackground(score) {
   if (abs >= 5) return "var(--heat-red)";
   if (abs === 4) return "var(--heat-orange)";
   if (abs === 3) return "var(--heat-yellow)";
-  return "var(--surface)";
+  return null;
 }
 
 function getDisplayValue(cellData) {
@@ -605,14 +605,14 @@ function getCellBackground(cellData) {
   if (highlightMode === "good") {
     const passScore = Math.abs(cellData.score) <= scoreMaxDiffFilter;
     const passGames = cellData.games >= scoreMinGamesFilter;
-    return passScore && passGames ? "var(--heat-highlight)" : "var(--surface)";
+    return passScore && passGames ? "var(--heat-highlight)" : null;
   }
 
   if (highlightMode === "counters") {
-    return displayMode === "wins" ? getScoreBackground(cellData.score) : "var(--surface)";
+    return displayMode === "wins" ? getScoreBackground(cellData.score) : null;
   }
 
-  return "var(--surface)";
+  return null;
 }
 
 function toggleHighlightMode(mode) {
@@ -827,7 +827,12 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
   const cell = document.createElement("td");
   cell.className = `score-cell ${scoreClass(cellData.score)}`;
   cell.title = `${state.rowDecks[rowIndex]} vs ${state.columnDecks[colIndex]} | Games played: ${cellData.games}`;
-  cell.style.background = getCellBackground(cellData);
+  const cellBackground = getCellBackground(cellData);
+  if (cellBackground) {
+    cell.style.background = cellBackground;
+  } else {
+    cell.style.removeProperty("background");
+  }
   cell.addEventListener("click", (event) => {
     event.stopPropagation();
     setActiveEditor(rowIndex, colIndex);
@@ -971,11 +976,17 @@ function positionActiveEditorPopover() {
   const popRect = popover.getBoundingClientRect();
   const margin = 10;
 
+  const gridWrap = app.querySelector(".grid-wrap");
+  const scrollbarH = gridWrap ? gridWrap.offsetHeight - gridWrap.clientHeight : 0;
+  const gridBottom = gridWrap
+    ? gridWrap.getBoundingClientRect().bottom - scrollbarH
+    : window.innerHeight;
+
   let left = cellRect.left + cellRect.width / 2 - popRect.width / 2;
   let top = cellRect.top + cellRect.height / 2 - popRect.height / 2;
 
   left = Math.max(margin, Math.min(left, window.innerWidth - popRect.width - margin));
-  top = Math.max(margin, Math.min(top, window.innerHeight - popRect.height - margin));
+  top = Math.max(margin, Math.min(top, gridBottom - popRect.height - margin));
 
   popover.style.left = `${Math.round(left)}px`;
   popover.style.top = `${Math.round(top)}px`;
@@ -1039,7 +1050,7 @@ function renderTableScreen() {
           <table class="matchup-table">
             <thead>
               <tr>
-                <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ""}" rowspan="2">
+                <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ``}"><div class="corner-cell-inner">
                   <span>Row \\ Column</span>
                   <div class="top-mini-actions">
                     <button class="mode-toggle mode-account-small ${accountOpen ? "active" : ""}" type="button" data-account-toggle>
@@ -1114,9 +1125,7 @@ function renderTableScreen() {
                         </div>`
                       : ""
                   }
-                </th>
-              </tr>
-              <tr>
+                </div></th>
                 ${state.columnDecks.map((_, index) => `<th data-col="${index}"></th>`).join("")}
                 <th class="sum-col">Total</th>
               </tr>

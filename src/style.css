@@ -30,6 +30,9 @@
   --chip-bg: #f0f4f8;
   --chip-border: #a8b6c6;
   --chip-ink: #2c3f52;
+  --stripe-row: #eef3f9;
+  --stripe-col: #e7eef7;
+  --stripe-cross: #dde7f4;
   --mobile-grid-offset: 3.75rem;
 }
 
@@ -65,10 +68,17 @@
   --chip-bg: #212a33;
   --chip-border: #3f5163;
   --chip-ink: #dae7f4;
+  --stripe-row: #202b36;
+  --stripe-col: #1a2530;
+  --stripe-cross: #141f29;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  height: 100%;
 }
 
 body {
@@ -76,7 +86,7 @@ body {
   font-family: "Archivo", "Segoe UI", sans-serif;
   color: var(--ink);
   background: var(--bg);
-  min-height: 100dvh;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -159,8 +169,10 @@ body {
 
 .page-shell {
   width: min(99vw, 1800px);
+  height: 100%;
   margin: 0 auto;
   display: grid;
+  grid-template-rows: 1fr;
   gap: 0;
 }
 
@@ -201,6 +213,9 @@ body {
 
 .panel {
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border-radius: 14px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -220,7 +235,8 @@ body {
 .grid-wrap {
   overflow: auto;
   -webkit-overflow-scrolling: touch;
-  height: 100dvh;
+  flex: 1;
+  min-height: 0;
   border-radius: 12px;
 }
 
@@ -248,7 +264,7 @@ body {
   border-top-left-radius: 12px;
 }
 
-.matchup-table thead tr:last-child th:last-child {
+.matchup-table thead tr:first-child th:last-child {
   border-top-right-radius: 12px;
 }
 
@@ -267,13 +283,13 @@ body {
   background: var(--surface-2);
 }
 
-.matchup-table :is(tbody, tfoot) tr > :first-child {
+.matchup-table :is(thead, tbody, tfoot) tr > :first-child {
   position: sticky;
   left: 0;
   z-index: 6;
 }
 
-.matchup-table thead tr:first-child > :first-child {
+.matchup-table thead tr > :first-child {
   top: 0;
   left: 0;
   z-index: 8;
@@ -289,6 +305,19 @@ body {
   background: var(--surface-2);
 }
 
+.matchup-table tbody tr:nth-child(even) > th.deck-heading,
+.matchup-table tbody tr:nth-child(even) > td {
+  background: var(--stripe-row);
+}
+
+.matchup-table tbody tr > td:nth-child(odd) {
+  background: var(--stripe-col);
+}
+
+.matchup-table tbody tr:nth-child(even) > td:nth-child(odd) {
+  background: var(--stripe-cross);
+}
+
 .corner-cell,
 .sum-row-label {
   min-width: 84px;
@@ -301,11 +330,16 @@ body {
 .corner-cell {
   position: sticky;
   left: 0;
+  padding: 0.06rem 0.1rem !important;
+}
+
+.corner-cell-inner {
   display: grid;
   gap: 0.06rem;
   justify-items: center;
   align-items: center;
-  padding: 0.06rem 0.1rem !important;
+  height: 100%;
+  width: 100%;
 }
 
 .corner-cell.controls-open {
@@ -1021,12 +1055,25 @@ body {
 }
 
 @media (max-width: 900px) {
+  html,
+  body {
+    height: auto;
+    min-height: 100%;
+  }
+
+  body {
+    overflow: auto;
+  }
+
   .grid-wrap {
-    height: calc(100dvh - env(safe-area-inset-top, 0px) - var(--mobile-grid-offset));
+    flex: initial;
+    overflow-x: auto;
+    overflow-y: visible;
   }
 
   .page-shell {
     width: min(99vw, 1800px);
+    height: auto;
     margin: 0 auto;
   }
 
