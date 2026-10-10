@@ -132,6 +132,9 @@ let remoteReloadTimer = null;
 let liveStatus = "connecting";
 let liveWasLost = false;
 let gridExpanded = false;
+let game = null;
+let wakeLock = null;
+const lifeDeltaTimers = {};
 let passwordMessage = "";
 let passwordRecovery = false;
 let authNotice = "";
@@ -1411,7 +1414,9 @@ function renderLogView() {
         <p class="h2h-note">${escapeHtml(leadText(record, rowIndex, colIndex))}</p>
       </article>
 
-      <p class="section-label">Who won?</p>
+      <button type="button" class="start-game-button" data-start-game>Start game</button>
+
+      <p class="section-label">Or log a result</p>
       <div class="win-buttons">
         <button type="button" class="win-button is-row" data-win="row">${escapeHtml(rowDeck)}<small>${PLAYER_NAMES.row}</small></button>
         <button type="button" class="win-button is-column" data-win="column">${escapeHtml(columnDeck)}<small>${PLAYER_NAMES.column}</small></button>
@@ -1762,6 +1767,7 @@ function bindSharedEvents() {
     const { rowIndex, colIndex } = getLogIndexes();
     recordResult(rowIndex, colIndex, el.dataset.win);
   });
+  onClick("[data-start-game]", startGame);
   onClick("[data-undo]", undoLastResult);
   onClick("[data-suggest]", suggestLeastPlayedPair);
 
@@ -1814,7 +1820,170 @@ function bindSharedEvents() {
   }
 }
 
+// ---------- Life counter ----------
+
+async function keepScreenOn() {
+  if (!navigator.wakeLock || (wakeLock && !wakeLock.released)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+  } catch {
+    wakeLock = null;
+  }
+}
+
+function releaseScreen() {
+  if (wakeLock) wakeLock.release().catch(() => {});
+  wakeLock = null;
+}
+
+function newGameState(rowDeck, columnDeck) {
+  return {
+    rowDeck,
+    columnDeck,
+    life: { row: 20, column: 20 },
+    delta: { row: 0, column: 0 },
+    menuOpen: false,
+    logged: null
+  };
+}
+
+function startGame() {
+  const { rowIndex, colIndex } = getLogIndexes();
+  game = newGameState(state.rowDecks[rowIndex], state.columnDecks[colIndex]);
+  accountOpen = false;
+  render();
+
+  keepScreenOn();
+  // Hide the browser bars where allowed (not on iPhone); the counter fills the window either way.
+  const root = document.documentElement;
+  if (root.requestFullscreen && !document.fullscreenElement) root.requestFullscreen().catch(() => {});
+}
+
+function restartGame() {
+  game = newGameState(game.rowDeck, game.columnDeck);
+  render();
+}
+
+function closeGame() {
+  logPick = { rowDeck: game.rowDeck, columnDeck: game.columnDeck };
+  game = null;
+  releaseScreen();
+  if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  render();
+}
+
+function changeLife(side, amount) {
+  game.life[side] += amount;
+  game.delta[side] += amount;
+
+  // Show the running change ("+5", "−3") until nobody has tapped that side for 4 seconds.
+  window.clearTimeout(lifeDeltaTimers[side]);
+  lifeDeltaTimers[side] = window.setTimeout(() => {
+    if (!game) return;
+    game.delta[side] = 0;
+    render();
+  }, 4000);
+
+  render();
+}
+
+function logGameWinner(winner) {
+  const indexes = getCellIndexesByDeckNames(game.rowDeck, game.columnDeck);
+  if (!indexes) {
+    showToast("These decks were renamed. Close the game and log it from New game.");
+    render();
+    return;
+  }
+
+  game.logged = winner;
+  recordResult(indexes.rowIndex, indexes.colIndex, winner);
+}
+
+function lifeHalfMarkup(side) {
+  const deck = side === "row" ? game.rowDeck : game.columnDeck;
+  const delta = game.delta[side];
+  const deltaText = delta > 0 ? `+${delta}` : delta < 0 ? `−${Math.abs(delta)}` : "";
+  const name = PLAYER_NAMES[side];
+
+  return `<section class="life-half is-${side}" aria-label="${name}'s life">
+    <button type="button" class="life-button" data-life="${side}" data-amount="-1" aria-label="${name}: lose 1 life">−</button>
+    <div class="life-center">
+      <p class="life-owner">${playerDot(side)}${name} · ${escapeHtml(deck)}</p>
+      <p class="life-total" aria-live="polite">${game.life[side]}</p>
+      <p class="life-delta">${deltaText}</p>
+    </div>
+    <button type="button" class="life-button" data-life="${side}" data-amount="1" aria-label="${name}: gain 1 life">+</button>
+  </section>`;
+}
+
+function gameMenuMarkup() {
+  if (!game.menuOpen) return "";
+
+  const deckOf = (side) => escapeHtml(side === "row" ? game.rowDeck : game.columnDeck);
+  const result = game.logged
+    ? `<p class="game-menu-note">${playerDot(game.logged)}Logged: ${PLAYER_NAMES[game.logged]}'s ${deckOf(game.logged)} won</p>`
+    : `<p class="section-label">Who won?</p>
+      <div class="win-buttons">
+        <button type="button" class="win-button is-row" data-game-win="row">${deckOf("row")}<small>${PLAYER_NAMES.row}</small></button>
+        <button type="button" class="win-button is-column" data-game-win="column">${deckOf("column")}<small>${PLAYER_NAMES.column}</small></button>
+      </div>`;
+
+  return `<div class="game-menu-backdrop" data-game-backdrop>
+    <div class="game-menu" role="dialog" aria-label="Game menu">
+      ${syncBannerMarkup()}
+      ${result}
+      <div class="two-buttons">
+        <button type="button" class="ghost-button" data-game-restart>${game.logged ? "Rematch" : "Restart game"}</button>
+        <button type="button" class="ghost-button" data-game-close>Close game</button>
+      </div>
+      <button type="button" class="ghost-button" data-game-resume>Back to game</button>
+    </div>
+  </div>`;
+}
+
+function renderGameScreen() {
+  app.innerHTML = `
+    <div class="game-screen">
+      ${lifeHalfMarkup("column")}
+      ${lifeHalfMarkup("row")}
+      <button type="button" class="game-menu-button" data-game-menu aria-label="Game menu" aria-expanded="${game.menuOpen}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+      </button>
+      ${gameMenuMarkup()}
+      ${actionToast ? `<p class="toast game-toast" role="status">${escapeHtml(actionToast)}</p>` : ""}
+    </div>
+  `;
+
+  onClick("[data-life]", (el) => changeLife(el.dataset.life, Number(el.dataset.amount)));
+  onClick("[data-game-menu]", () => {
+    game.menuOpen = !game.menuOpen;
+    render();
+  });
+  onClick("[data-game-win]", (el) => logGameWinner(el.dataset.gameWin));
+  onClick("[data-game-restart]", restartGame);
+  onClick("[data-game-close]", closeGame);
+  onClick("[data-game-resume]", () => {
+    game.menuOpen = false;
+    render();
+  });
+  onClick("[data-sync-retry]", retrySyncNow);
+
+  const backdrop = app.querySelector("[data-game-backdrop]");
+  if (backdrop) {
+    backdrop.addEventListener("click", (event) => {
+      if (event.target !== backdrop) return;
+      game.menuOpen = false;
+      render();
+    });
+  }
+}
+
 function renderAppScreen() {
+  if (game) {
+    renderGameScreen();
+    return;
+  }
+
   const views = {
     log: renderLogView,
     decks: renderDecksView,
@@ -1889,6 +2058,8 @@ async function handleSession(session) {
     cellSyncInFlight = false;
     pendingCellOps = [];
     sessionLog = [];
+    game = null;
+    releaseScreen();
     if (saveTimer) {
       window.clearTimeout(saveTimer);
       saveTimer = null;
@@ -1950,7 +2121,10 @@ async function initApp() {
 
   // Phones pause pages in the background; catch up and flush unsaved games when it comes back.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") retrySyncNow();
+    if (document.visibilityState !== "visible") return;
+    retrySyncNow();
+    // The browser drops the screen wake lock when the page is hidden.
+    if (game) keepScreenOn();
   });
   window.addEventListener("online", () => {
     retrySyncNow();
