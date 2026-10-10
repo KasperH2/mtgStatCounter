@@ -72,18 +72,46 @@ const state = {
   matrix: makeDefaultMatrix()
 };
 
+const PLAYER_NAMES = { row: "Kasper", column: "Daniel" };
+const TABS = [
+  {
+    id: "log",
+    label: "New game",
+    icon: '<circle cx="12" cy="12" r="8.5"/><path d="M12 8v8"/><path d="M8 12h8"/>'
+  },
+  {
+    id: "grid",
+    label: "Grid",
+    icon: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>'
+  },
+  {
+    id: "decks",
+    label: "Win rates",
+    icon: '<path d="M5 20v-8"/><path d="M12 20V5"/><path d="M19 20v-5"/><path d="M3 20h18"/>'
+  }
+];
+
 let isDarkMode = false;
 let activeEditor = null;
-let displayMode = "wins";
 let scoreMinGamesFilter = 5;
 let scoreMaxDiffFilter = 2;
-let gamesMinFilter = 0;
-let gamesMaxFilter = 9999;
+let clearMinGamesFilter = 5;
+let clearMinDiffFilter = 4;
+let fewMaxGamesFilter = 0;
 let sortMode = "none";
-let unsortedSnapshot = null;
-let highlightMode = "counters";
+let unsortedOrder = null;
+let highlightMode = "ahead";
 let accountOpen = false;
 let highlightOpen = false;
+
+let activeTab = "log";
+let logPick = { rowDeck: null, columnDeck: null };
+let decksAxis = "both";
+let deckDetail = null;
+let sessionLog = [];
+let actionToast = "";
+let actionToastTimer = null;
+const viewScrollTop = {};
 
 let currentUser = null;
 let isInitializing = true;
@@ -101,6 +129,12 @@ let cellSyncRetryCount = 0;
 let pendingCellOps = [];
 let realtimeChannel = null;
 let remoteReloadTimer = null;
+let liveStatus = "connecting";
+let liveWasLost = false;
+let gridExpanded = false;
+let passwordMessage = "";
+let passwordRecovery = false;
+let authNotice = "";
 let gridScrollLeft = 0;
 let gridScrollTop = 0;
 
@@ -167,6 +201,9 @@ function clearRealtimeSubscription() {
     supabase.removeChannel(realtimeChannel);
     realtimeChannel = null;
   }
+
+  liveStatus = "connecting";
+  liveWasLost = false;
 }
 
 function scheduleRemoteReload() {
@@ -203,7 +240,7 @@ function setupRealtimeSubscription() {
     .on("postgres_changes", { event: "*", schema: "public", table: "matchup_cells" }, (payload) => {
       const row = payload.new;
       if (!row) return;
-      if (row.updated_by === currentUser.id) return;
+      // Own echoes are applied too, so two devices on the same account stay in step.
       if (hasPendingCellOp(String(row.row_deck), String(row.column_deck))) return;
 
       applyRemoteCellState(row);
@@ -213,13 +250,68 @@ function setupRealtimeSubscription() {
       const row = payload.new || payload.old;
       if (row && row.updated_by === currentUser.id) return;
       scheduleRemoteReload();
-    })
-    .subscribe();
+    });
+
+  const channel = realtimeChannel;
+  channel.subscribe((status) => {
+    // Ignore late status events from a channel that was already replaced or removed.
+    if (channel !== realtimeChannel) return;
+    if (status === "SUBSCRIBED") {
+      // Realtime does not replay missed events, so catch up after any gap.
+      if (liveWasLost) scheduleRemoteReload();
+      liveStatus = "live";
+    } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+      liveStatus = "offline";
+      liveWasLost = true;
+    }
+    render();
+  });
+}
+
+function retrySyncNow() {
+  if (!currentUser || !supabase) return;
+
+  if (pendingCellOps.length) {
+    clearCellSyncRetryTimer();
+    processCellSyncQueue();
+  }
+
+  if (saveRetryTimer) {
+    clearSaveRetryTimer();
+    persistRemoteState("saved");
+  }
+
+  if (liveStatus !== "live") setupRealtimeSubscription();
+  scheduleRemoteReload();
+}
+
+function hasUnsavedChanges() {
+  return pendingCellOps.length > 0 || saveInFlight || cellSyncInFlight || Boolean(saveTimer) || Boolean(saveRetryTimer);
+}
+
+// Full screen only grows the grid to the window; the grid's own controls stay.
+function toggleGridFullscreen() {
+  gridExpanded = !gridExpanded;
+  activeEditor = null;
+  render();
+}
+
+function exitGridFullscreen() {
+  gridExpanded = false;
+}
+
+function setActiveTab(tabId) {
+  if (tabId !== "grid" && gridExpanded) exitGridFullscreen();
+  activeTab = tabId;
+  accountOpen = false;
+  highlightOpen = false;
+  activeEditor = null;
+  render();
 }
 
 function loadThemePreference() {
   const saved = window.localStorage.getItem("mtg-theme");
-  isDarkMode = saved === "dark";
+  isDarkMode = saved !== "light";
   document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
 }
 
@@ -227,18 +319,6 @@ function toggleTheme() {
   isDarkMode = !isDarkMode;
   document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
   window.localStorage.setItem("mtg-theme", isDarkMode ? "dark" : "light");
-  render();
-}
-
-function openAccountPanel() {
-  accountOpen = true;
-  highlightOpen = false;
-  render();
-}
-
-function openHighlightPanel() {
-  highlightOpen = true;
-  accountOpen = false;
   render();
 }
 
@@ -251,7 +331,9 @@ function isAllowedUser(user) {
 function deckLayoutRows() {
   const nowIso = new Date().toISOString();
 
-  const rowRows = state.rowDecks.map((deckName, position) => ({
+  const layout = getLayoutOrder();
+
+  const rowRows = layout.rowDecks.map((deckName, position) => ({
     axis: "row",
     position,
     deck_name: deckName,
@@ -259,7 +341,7 @@ function deckLayoutRows() {
     updated_at: nowIso
   }));
 
-  const columnRows = state.columnDecks.map((deckName, position) => ({
+  const columnRows = layout.columnDecks.map((deckName, position) => ({
     axis: "column",
     position,
     deck_name: deckName,
@@ -339,6 +421,11 @@ async function loadRemoteState() {
   state.rowDecks = rowDecks;
   state.columnDecks = columnDecks;
   state.matrix = matrix;
+
+  if (sortMode !== "none") {
+    unsortedOrder = { rowDecks: [...rowDecks], columnDecks: [...columnDecks] };
+    reorderGrid(sortedDeckNames("row", sortMode), sortedDeckNames("column", sortMode));
+  }
 }
 
 async function persistRemoteState(successStatus = "saved") {
@@ -565,53 +652,229 @@ async function processCellSyncQueue() {
   scheduleSavedIndicatorReset();
 }
 
-function getRowTotals() {
-  return state.matrix.map((row) => row.reduce((sum, cell) => sum + Number(cell.score || 0), 0));
-}
-
-function getColumnTotals() {
-  return state.columnDecks.map((_, colIndex) =>
-    state.matrix.reduce((sum, row) => sum + Number((row[colIndex] && row[colIndex].score) || 0), 0)
+function escapeHtml(value) {
+  return String(value).replace(
+    /[&<>"']/g,
+    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]
   );
 }
 
-function getRowGameTotals() {
-  return state.matrix.map((row) => row.reduce((sum, cell) => sum + Number(cell.games || 0), 0));
-}
-
-function getColumnGameTotals() {
-  return state.columnDecks.map((_, colIndex) =>
-    state.matrix.reduce((sum, row) => sum + Number((row[colIndex] && row[colIndex].games) || 0), 0)
-  );
-}
-
-function scoreClass(value) {
-  if (value > 0) return "is-positive";
-  if (value < 0) return "is-negative";
-  return "is-neutral";
-}
-
-function getScoreBackground(score) {
-  const abs = Math.abs(score);
-  if (abs >= 5) return "var(--heat-red)";
-  if (abs === 4) return "var(--heat-orange)";
-  if (abs === 3) return "var(--heat-yellow)";
+// Stored score is column wins minus row wins: positive means Daniel's deck leads.
+function leaderOf(score) {
+  if (score < 0) return "row";
+  if (score > 0) return "column";
   return null;
 }
 
-function getDisplayValue(cellData) {
-  return displayMode === "games" ? cellData.games : cellData.score;
+function getRecord(cellData) {
+  const games = Math.max(0, Math.trunc(Number(cellData.games || 0)));
+  const score = Math.trunc(Number(cellData.score || 0));
+  return {
+    games,
+    score,
+    rowWins: Math.max(0, Math.round((games - score) / 2)),
+    columnWins: Math.max(0, Math.round((games + score) / 2))
+  };
 }
 
-function getCellBackground(cellData) {
-  if (highlightMode === "good") {
-    const passScore = Math.abs(cellData.score) <= scoreMaxDiffFilter;
-    const passGames = cellData.games >= scoreMinGamesFilter;
-    return passScore && passGames ? "var(--heat-highlight)" : null;
+function winRate(wins, losses) {
+  const total = wins + losses;
+  return total ? Math.round((wins / total) * 100) : null;
+}
+
+function formatRate(rate) {
+  return rate === null ? "–" : `${rate}%`;
+}
+
+function isEvenMatchup(cellData) {
+  const { games, score } = getRecord(cellData);
+  return games >= scoreMinGamesFilter && Math.abs(score) <= scoreMaxDiffFilter;
+}
+
+function isClearMatchup(cellData) {
+  const { games, score } = getRecord(cellData);
+  return games >= clearMinGamesFilter && Math.abs(score) >= clearMinDiffFilter;
+}
+
+function isFewGamesMatchup(cellData) {
+  return getRecord(cellData).games <= fewMaxGamesFilter;
+}
+
+function deckNameFor(axis, index) {
+  return axis === "row" ? state.rowDecks[index] : state.columnDecks[index];
+}
+
+function getDeckSummary(axis, index) {
+  const opponents = axis === "row" ? state.columnDecks : state.rowDecks;
+  let wins = 0;
+  let losses = 0;
+  let games = 0;
+
+  const matchups = opponents.map((opponent, opponentIndex) => {
+    const cellData = axis === "row" ? state.matrix[index][opponentIndex] : state.matrix[opponentIndex][index];
+    const record = getRecord(cellData);
+    const ownWins = axis === "row" ? record.rowWins : record.columnWins;
+    const ownLosses = axis === "row" ? record.columnWins : record.rowWins;
+    wins += ownWins;
+    losses += ownLosses;
+    games += record.games;
+    return {
+      opponent,
+      rowIndex: axis === "row" ? index : opponentIndex,
+      colIndex: axis === "row" ? opponentIndex : index,
+      cellData,
+      wins: ownWins,
+      losses: ownLosses,
+      games: record.games,
+      rate: winRate(ownWins, ownLosses)
+    };
+  });
+
+  return { name: deckNameFor(axis, index), axis, index, wins, losses, games, rate: winRate(wins, losses), matchups };
+}
+
+function pairVerdict(cellData, rowIndex, colIndex) {
+  const record = getRecord(cellData);
+  const leader = leaderOf(record.score);
+  const leaderDeck = leader ? deckNameFor(leader, leader === "row" ? rowIndex : colIndex) : "";
+
+  if (record.games === 0) return { kind: "untested", label: "Untested", leader };
+  if (isClearMatchup(cellData)) return { kind: `clear-${leader}`, label: `Clear: ${leaderDeck}`, leader };
+  if (isEvenMatchup(cellData)) return { kind: "even", label: "Even", leader };
+  if (record.games < clearMinGamesFilter) return { kind: "few", label: "Few games", leader };
+  return { kind: "leaning", label: leader ? `Leaning ${leaderDeck}` : "Tied", leader };
+}
+
+function deckVerdict(axis, cellData) {
+  const record = getRecord(cellData);
+  if (record.games === 0) return { kind: "untested", label: "Untested" };
+  if (isClearMatchup(cellData)) {
+    return leaderOf(record.score) === axis ? { kind: "favored", label: "Favored" } : { kind: "unfavored", label: "Unfavored" };
+  }
+  if (isEvenMatchup(cellData)) return { kind: "even", label: "Even" };
+  if (record.games < clearMinGamesFilter) return { kind: "few", label: "Few games" };
+  return { kind: "leaning", label: "Leaning" };
+}
+
+function leadText(record, rowIndex, colIndex) {
+  if (record.games === 0) return "No games yet";
+  const leader = leaderOf(record.score);
+  if (!leader) return "Dead even";
+  const deck = deckNameFor(leader, leader === "row" ? rowIndex : colIndex);
+  const diff = Math.abs(record.score);
+  return `${PLAYER_NAMES[leader]}'s ${deck} is ${diff} ${diff === 1 ? "win" : "wins"} ahead`;
+}
+
+function splitBarMarkup(rowWins, columnWins) {
+  if (!rowWins && !columnWins) return `<div class="split-bar"><i class="is-empty"></i></div>`;
+  return `<div class="split-bar">${rowWins ? `<i class="is-row" style="flex:${rowWins}"></i>` : ""}${
+    columnWins ? `<i class="is-column" style="flex:${columnWins}"></i>` : ""
+  }</div>`;
+}
+
+function showToast(message) {
+  actionToast = message;
+  if (actionToastTimer) window.clearTimeout(actionToastTimer);
+  actionToastTimer = window.setTimeout(() => {
+    actionToast = "";
+    actionToastTimer = null;
+    render();
+  }, 1800);
+}
+
+function recordResult(rowIndex, colIndex, winner) {
+  const cell = state.matrix[rowIndex][colIndex];
+  const rowDeck = state.rowDecks[rowIndex];
+  const columnDeck = state.columnDecks[colIndex];
+  const scoreDelta = winner === "column" ? 1 : -1;
+
+  cell.score += scoreDelta;
+  cell.games += 1;
+  queueCellSyncOperation(rowDeck, columnDeck, scoreDelta, 1);
+
+  sessionLog.unshift({ rowDeck, columnDeck, winner });
+  showToast(`Logged: ${PLAYER_NAMES[winner]}'s ${winner === "row" ? rowDeck : columnDeck} won`);
+  render();
+}
+
+function undoLastResult() {
+  const last = sessionLog.shift();
+  if (!last) return;
+
+  const indexes = getCellIndexesByDeckNames(last.rowDeck, last.columnDeck);
+  if (indexes) {
+    const cell = state.matrix[indexes.rowIndex][indexes.colIndex];
+    const scoreDelta = last.winner === "column" ? -1 : 1;
+    const gamesDelta = cell.games > 0 ? -1 : 0;
+    cell.score += scoreDelta;
+    cell.games += gamesDelta;
+    queueCellSyncOperation(last.rowDeck, last.columnDeck, scoreDelta, gamesDelta);
   }
 
-  if (highlightMode === "counters") {
-    return displayMode === "wins" ? getScoreBackground(cellData.score) : null;
+  showToast("Last game removed");
+  render();
+}
+
+function getLogIndexes() {
+  const rowIndex = Math.max(0, state.rowDecks.indexOf(logPick.rowDeck));
+  const colIndex = Math.max(0, state.columnDecks.indexOf(logPick.columnDeck));
+  return { rowIndex, colIndex };
+}
+
+function openPairInLog(rowIndex, colIndex) {
+  logPick = { rowDeck: state.rowDecks[rowIndex], columnDeck: state.columnDecks[colIndex] };
+  viewScrollTop.log = 0;
+  setActiveTab("log");
+}
+
+// Picks a random pair from the least-played ones (fewest games, or one more), never the pair already shown.
+function suggestLeastPlayedPair() {
+  const current = getLogIndexes();
+  const pairs = state.matrix.flatMap((row, rowIndex) =>
+    row.map((cellData, colIndex) => ({ rowIndex, colIndex, games: getRecord(cellData).games }))
+  );
+  const others = pairs.filter((pair) => pair.rowIndex !== current.rowIndex || pair.colIndex !== current.colIndex);
+  if (!others.length) return;
+
+  const fewest = Math.min(...others.map((pair) => pair.games));
+  const candidates = others.filter((pair) => pair.games <= fewest + 1);
+  const pick = candidates[Math.floor(Math.random() * candidates.length)];
+
+  logPick = { rowDeck: state.rowDecks[pick.rowIndex], columnDeck: state.columnDecks[pick.colIndex] };
+  showToast(pick.games ? `Suggested: played ${pick.games} ${pick.games === 1 ? "time" : "times"}` : "Suggested: never played");
+  render();
+}
+
+// Diverging scale from Kasper's side: blue when his deck is favored, orange when Daniel's is.
+function getAheadPaint(record) {
+  const rate = winRate(record.rowWins, record.columnWins);
+  if (rate === null) return null;
+  if (rate >= 70) return { background: "var(--kasper)", strong: true };
+  if (rate > 55) return { background: "var(--kasper-soft)", strong: false };
+  if (rate >= 45) return { background: "var(--mid)", strong: false };
+  if (rate > 30) return { background: "var(--daniel-soft)", strong: false };
+  return { background: "var(--daniel)", strong: true };
+}
+
+function getDisplayValue(cellData) {
+  const record = getRecord(cellData);
+  return record.games ? `${record.rowWins}-${record.columnWins}` : "·";
+}
+
+function getCellPaint(cellData) {
+  const record = getRecord(cellData);
+
+  if (highlightMode === "ahead") return getAheadPaint(record);
+
+  if (highlightMode === "clear") {
+    if (!isClearMatchup(cellData)) return null;
+    return leaderOf(record.score) === "row"
+      ? { background: "var(--kasper)", strong: true }
+      : { background: "var(--daniel)", strong: true };
+  }
+
+  if (highlightMode === "few") {
+    return isFewGamesMatchup(cellData) ? { background: "var(--few-highlight)", strong: false } : null;
   }
 
   return null;
@@ -623,130 +886,103 @@ function toggleHighlightMode(mode) {
   render();
 }
 
-function cloneMatrix(matrix) {
-  return matrix.map((row) =>
-    row.map((cell) => ({ score: cell.score, games: cell.games, updatedAt: cell.updatedAt || null }))
-  );
+// Sorting only reorders decks; the original order is kept by name so live edits are never overwritten.
+function reorderGrid(rowOrder, columnOrder) {
+  const rowIndexes = rowOrder.map((name) => state.rowDecks.indexOf(name)).filter((index) => index !== -1);
+  const columnIndexes = columnOrder.map((name) => state.columnDecks.indexOf(name)).filter((index) => index !== -1);
+  if (rowIndexes.length !== state.rowDecks.length || columnIndexes.length !== state.columnDecks.length) return;
+
+  state.matrix = rowIndexes.map((rowIndex) => columnIndexes.map((colIndex) => state.matrix[rowIndex][colIndex]));
+  state.rowDecks = rowIndexes.map((index) => state.rowDecks[index]);
+  state.columnDecks = columnIndexes.map((index) => state.columnDecks[index]);
 }
 
-function captureUnsortedSnapshot() {
-  if (sortMode !== "none" || unsortedSnapshot) return;
-  unsortedSnapshot = {
-    rowDecks: [...state.rowDecks],
-    columnDecks: [...state.columnDecks],
-    matrix: cloneMatrix(state.matrix)
-  };
+function clearUnsortedOrder() {
+  unsortedOrder = null;
 }
 
-function clearUnsortedSnapshot() {
-  unsortedSnapshot = null;
+function getLayoutOrder() {
+  return unsortedOrder || { rowDecks: state.rowDecks, columnDecks: state.columnDecks };
 }
 
-function restoreUnsortedSnapshot() {
-  if (!unsortedSnapshot) return false;
+function deckSortValue(axis, index, mode) {
+  const summary = getDeckSummary(axis, index);
+  if (mode === "diff") return summary.wins - summary.losses;
+  return summary.games;
+}
 
-  state.rowDecks = [...unsortedSnapshot.rowDecks];
-  state.columnDecks = [...unsortedSnapshot.columnDecks];
-  state.matrix = cloneMatrix(unsortedSnapshot.matrix);
-  clearUnsortedSnapshot();
+function sortedDeckNames(axis, mode) {
+  const decks = axis === "row" ? state.rowDecks : state.columnDecks;
+  return decks
+    .map((name, index) => ({ name, value: deckSortValue(axis, index, mode), games: getDeckSummary(axis, index).games }))
+    .sort((a, b) => b.value - a.value || b.games - a.games)
+    .map((deck) => deck.name);
+}
+
+function applyGridSort(mode) {
   activeEditor = null;
-  return true;
-}
 
-function autoSortByPerformance() {
-  const rowTotals = getRowTotals();
-  const columnTotals = getColumnTotals();
-
-  const rowOrder = state.rowDecks.map((_, index) => index).sort((a, b) => rowTotals[a] - rowTotals[b]);
-  const columnOrder = state.columnDecks
-    .map((_, index) => index)
-    .sort((a, b) => columnTotals[b] - columnTotals[a]);
-
-  state.rowDecks = rowOrder.map((index) => state.rowDecks[index]);
-  state.matrix = rowOrder.map((index) => state.matrix[index]);
-
-  state.columnDecks = columnOrder.map((index) => state.columnDecks[index]);
-  state.matrix = state.matrix.map((row) => columnOrder.map((index) => row[index]));
-
-  activeEditor = null;
-}
-
-function sortByMostWins() {
-  if (sortMode === "wins") {
+  if (mode === "none") {
+    if (unsortedOrder) reorderGrid(unsortedOrder.rowDecks, unsortedOrder.columnDecks);
+    clearUnsortedOrder();
     sortMode = "none";
-    restoreUnsortedSnapshot();
     render();
     return;
   }
 
-  captureUnsortedSnapshot();
-  autoSortByPerformance();
-  sortMode = "wins";
-  render();
-}
-
-function sortByMostPlayed() {
-  if (sortMode === "games") {
-    sortMode = "none";
-    restoreUnsortedSnapshot();
-    render();
-    return;
+  if (!unsortedOrder) {
+    unsortedOrder = { rowDecks: [...state.rowDecks], columnDecks: [...state.columnDecks] };
   }
 
-  captureUnsortedSnapshot();
-  const rowGameTotals = getRowGameTotals();
-  const columnGameTotals = getColumnGameTotals();
-
-  const rowOrder = state.rowDecks.map((_, index) => index).sort((a, b) => rowGameTotals[b] - rowGameTotals[a]);
-  const columnOrder = state.columnDecks
-    .map((_, index) => index)
-    .sort((a, b) => columnGameTotals[b] - columnGameTotals[a]);
-
-  state.rowDecks = rowOrder.map((index) => state.rowDecks[index]);
-  state.matrix = rowOrder.map((index) => state.matrix[index]);
-
-  state.columnDecks = columnOrder.map((index) => state.columnDecks[index]);
-  state.matrix = state.matrix.map((row) => columnOrder.map((index) => row[index]));
-
-  activeEditor = null;
-  sortMode = "games";
+  reorderGrid(sortedDeckNames("row", mode), sortedDeckNames("column", mode));
+  sortMode = mode;
   render();
 }
 
-function toggleDisplayMode() {
-  displayMode = displayMode === "wins" ? "games" : "wins";
-  highlightOpen = false;
-  render();
+const SORT_MODES = [
+  ["none", "Original"],
+  ["diff", "Most wins"],
+  ["games", "Most games"]
+];
+
+const HIGHLIGHT_MODES = [
+  ["ahead", "Who's ahead"],
+  ["clear", "Clear winner"],
+  ["few", "Few games"]
+];
+
+const FILTER_LIMITS = {
+  scoreMaxDiff: { min: 0, fallback: 2 },
+  scoreMinGames: { min: 0, fallback: 5 },
+  clearMinGames: { min: 1, fallback: 5 },
+  clearMinDiff: { min: 1, fallback: 4 },
+  fewMaxGames: { min: 0, fallback: 0 }
+};
+
+function getFilterValue(kind) {
+  if (kind === "scoreMaxDiff") return scoreMaxDiffFilter;
+  if (kind === "scoreMinGames") return scoreMinGamesFilter;
+  if (kind === "clearMinGames") return clearMinGamesFilter;
+  if (kind === "clearMinDiff") return clearMinDiffFilter;
+  return fewMaxGamesFilter;
+}
+
+function assignFilterValue(kind, value) {
+  const limits = FILTER_LIMITS[kind];
+  const next = Math.max(limits.min, Math.trunc(value));
+  if (kind === "scoreMaxDiff") scoreMaxDiffFilter = next;
+  else if (kind === "scoreMinGames") scoreMinGamesFilter = next;
+  else if (kind === "clearMinGames") clearMinGamesFilter = next;
+  else if (kind === "clearMinDiff") clearMinDiffFilter = next;
+  else fewMaxGamesFilter = next;
 }
 
 function setFilterValue(kind, value) {
   const raw = String(value).trim();
-
-  if (kind === "scoreMaxDiff") {
-    if (raw === "") {
-      scoreMaxDiffFilter = 2;
-    } else {
-      const parsed = Number(raw);
-      if (Number.isNaN(parsed)) return;
-      scoreMaxDiffFilter = Math.max(0, Math.trunc(parsed));
-    }
-
-    highlightOpen = true;
-    render();
-    return;
-  }
-
-  const parsed = Number(value);
+  const parsed = raw === "" ? FILTER_LIMITS[kind].fallback : Number(raw);
   if (Number.isNaN(parsed)) return;
 
-  if (kind === "scoreMinGames") {
-    scoreMinGamesFilter = Math.max(0, Math.trunc(parsed));
-  } else if (kind === "gamesMin") {
-    gamesMinFilter = Math.max(0, Math.trunc(parsed));
-  } else {
-    gamesMaxFilter = Math.max(0, Math.trunc(parsed));
-  }
-
+  assignFilterValue(kind, parsed);
   highlightOpen = true;
   render();
 }
@@ -755,86 +991,88 @@ function updateDeckName(type, index, value) {
   const nextName = value.trim();
   if (!nextName) return;
 
+  const previousName = type === "row" ? state.rowDecks[index] : state.columnDecks[index];
   if (type === "row") {
     state.rowDecks[index] = nextName;
+    if (logPick.rowDeck === previousName) logPick.rowDeck = nextName;
   } else {
     state.columnDecks[index] = nextName;
+    if (logPick.columnDeck === previousName) logPick.columnDeck = nextName;
   }
 
-  if (sortMode !== "none") {
-    sortMode = "none";
-    clearUnsortedSnapshot();
+  if (unsortedOrder) {
+    const list = type === "row" ? unsortedOrder.rowDecks : unsortedOrder.columnDecks;
+    const position = list.indexOf(previousName);
+    if (position !== -1) list[position] = nextName;
   }
 
   scheduleSave();
   render();
 }
 
-function nudgeCellValue(rowIndex, colIndex, key, delta) {
+function nudgeGames(rowIndex, colIndex, delta) {
   const cell = state.matrix[rowIndex][colIndex];
-  const rowDeck = state.rowDecks[rowIndex];
-  const columnDeck = state.columnDecks[colIndex];
-
-  if (key === "score") {
-    cell.score += delta;
-    cell.games += 1;
-    queueCellSyncOperation(rowDeck, columnDeck, delta, 1);
-  } else {
-    const previousGames = cell.games;
-    cell.games = Math.max(0, cell.games + delta);
-    const effectiveDelta = cell.games - previousGames;
-    if (effectiveDelta !== 0) {
-      queueCellSyncOperation(rowDeck, columnDeck, 0, effectiveDelta);
-    }
+  const previousGames = cell.games;
+  cell.games = Math.max(0, cell.games + delta);
+  const effectiveDelta = cell.games - previousGames;
+  if (effectiveDelta !== 0) {
+    queueCellSyncOperation(state.rowDecks[rowIndex], state.columnDecks[colIndex], 0, effectiveDelta);
   }
 
-  sortMode = "none";
-  clearUnsortedSnapshot();
   render();
 }
 
 function setActiveEditor(rowIndex, colIndex) {
   const isSame = activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex;
-  activeEditor = isSame
-    ? null
-    : {
-        row: rowIndex,
-        col: colIndex,
-        revealGamesEditor: displayMode !== "games"
-      };
+  activeEditor = isSame ? null : { row: rowIndex, col: colIndex, revealGamesEditor: false };
   render();
 }
 
 function buildHeaderCell(name, type, index) {
   const cell = document.createElement("th");
-  cell.className = "deck-heading";
+  cell.className = `deck-heading ${type === "column" ? "is-column-deck" : "is-row-deck"}`;
 
   const input = document.createElement("input");
   input.value = name;
   input.className = `deck-input ${type === "column" ? "column-input" : "row-input"}`;
-  if (type === "row") {
-    input.size = Math.max(6, name.length);
-  }
-  input.setAttribute("aria-label", `${type === "row" ? "Row" : "Column"} deck name ${index + 1}`);
+  // Size each name box to its text, so the name row and column only take the space of the longest name.
+  input.size = Math.max(2, name.length);
+  input.setAttribute("aria-label", `${PLAYER_NAMES[type]}'s deck name ${index + 1}`);
   input.addEventListener("change", (event) => updateDeckName(type, index, event.target.value));
 
   cell.append(input);
   return cell;
 }
 
+function makeButton(className, text, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = text;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
 function buildScoreCell(rowIndex, colIndex, cellData) {
   const isActiveCell = activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex;
-  const shouldRevealGamesEditor = displayMode !== "games" || (isActiveCell && activeEditor.revealGamesEditor);
+  const record = getRecord(cellData);
+  const rowDeck = state.rowDecks[rowIndex];
+  const columnDeck = state.columnDecks[colIndex];
 
   const cell = document.createElement("td");
-  cell.className = `score-cell ${scoreClass(cellData.score)}`;
-  cell.title = `${state.rowDecks[rowIndex]} vs ${state.columnDecks[colIndex]} | Games played: ${cellData.games}`;
-  const cellBackground = getCellBackground(cellData);
-  if (cellBackground) {
-    cell.style.background = cellBackground;
-  } else {
-    cell.style.removeProperty("background");
-  }
+  const paint = getCellPaint(cellData);
+  cell.className = [
+    "score-cell",
+    paint && paint.strong ? "is-strong" : "",
+    record.games === 0 && !paint ? "is-untested" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+  cell.title = `${rowDeck} vs ${columnDeck} | ${record.rowWins}-${record.columnWins} | Games played: ${record.games}`;
+  if (paint) cell.style.setProperty("--cell-bg", paint.background);
   cell.addEventListener("click", (event) => {
     event.stopPropagation();
     setActiveEditor(rowIndex, colIndex);
@@ -845,102 +1083,76 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
 
   const value = document.createElement("div");
   value.className = "score-value";
-  value.textContent = String(getDisplayValue(cellData));
-
-  const popover = document.createElement("div");
-  popover.className = "cell-popover";
-  popover.addEventListener("click", (event) => event.stopPropagation());
-
-  const title = document.createElement("p");
-  title.className = "editor-title";
-  title.textContent = `${state.rowDecks[rowIndex]} vs. ${state.columnDecks[colIndex]}`;
-
-  const stats = document.createElement("div");
-  stats.className = "editor-stats";
-
-  const scoreStat = document.createElement("span");
-  scoreStat.className = "editor-stat-chip";
-  scoreStat.textContent = `Score: ${cellData.score}`;
-
-  const gamesStat = document.createElement("span");
-  gamesStat.className = "editor-stat-chip";
-  gamesStat.textContent = `Games: ${cellData.games}`;
-
-  stats.append(scoreStat, gamesStat);
-
-  let editorLabel = null;
-  if (displayMode === "wins" || shouldRevealGamesEditor) {
-    editorLabel = document.createElement("p");
-    editorLabel.className = "editor-mode-label";
-    if (displayMode === "wins") {
-      editorLabel.textContent = "Edit score";
-    } else {
-      editorLabel.classList.add("is-warning");
-      editorLabel.textContent = "Warning, you are editing number of games played";
-    }
-  }
-
-  const editorRow = document.createElement("div");
-  editorRow.className = "editor-row";
-
-  const revealGamesButton = document.createElement("button");
-  revealGamesButton.type = "button";
-  revealGamesButton.className = "editor-reveal-button";
-  revealGamesButton.textContent = "Edit no. of games played";
-  revealGamesButton.addEventListener("click", (event) => {
-    event.stopPropagation();
-    activeEditor = {
-      row: rowIndex,
-      col: colIndex,
-      revealGamesEditor: true
-    };
-    render();
-  });
-
-  const minusButton = document.createElement("button");
-  minusButton.type = "button";
-  minusButton.className = "editor-button side-minus";
-  minusButton.textContent = "-";
-  minusButton.addEventListener("click", () =>
-    nudgeCellValue(rowIndex, colIndex, displayMode === "wins" ? "score" : "games", -1)
-  );
-
-  const editValue = document.createElement("span");
-  editValue.className = "editor-value";
-  editValue.textContent = String(displayMode === "wins" ? cellData.score : cellData.games);
-
-  const plusButton = document.createElement("button");
-  plusButton.type = "button";
-  plusButton.className = "editor-button side-plus";
-  plusButton.textContent = "+";
-  plusButton.addEventListener("click", () =>
-    nudgeCellValue(rowIndex, colIndex, displayMode === "wins" ? "score" : "games", 1)
-  );
-
-  const closeButton = document.createElement("button");
-  closeButton.type = "button";
-  closeButton.className = "popover-close";
-  closeButton.textContent = "Close";
-  closeButton.addEventListener("click", (event) => {
-    event.stopPropagation();
-    activeEditor = null;
-    render();
-  });
-
-  editorRow.append(minusButton, editValue, plusButton);
-  popover.append(closeButton, title, stats);
-  if (editorLabel) {
-    popover.append(editorLabel);
-  }
-  if (shouldRevealGamesEditor) {
-    popover.append(editorRow);
-  } else {
-    popover.append(revealGamesButton);
-  }
-
+  value.textContent = getDisplayValue(cellData);
   shell.append(value);
 
   if (isActiveCell) {
+    const popover = document.createElement("div");
+    popover.className = "cell-popover";
+    popover.addEventListener("click", (event) => event.stopPropagation());
+
+    const closeButton = makeButton("popover-close", "Close", () => {
+      activeEditor = null;
+      render();
+    });
+
+    const title = document.createElement("p");
+    title.className = "editor-title";
+    title.textContent = `${rowDeck} vs. ${columnDeck}`;
+
+    const stats = document.createElement("div");
+    stats.className = "editor-stats";
+    [
+      [`${PLAYER_NAMES.row}: ${record.rowWins}`, "is-row"],
+      [`${PLAYER_NAMES.column}: ${record.columnWins}`, "is-column"],
+      [`Games: ${record.games}`, ""]
+    ].forEach(([text, modifier]) => {
+      const chip = document.createElement("span");
+      chip.className = `editor-stat-chip ${modifier}`;
+      chip.textContent = text;
+      stats.append(chip);
+    });
+
+    const label = document.createElement("p");
+    label.className = "editor-mode-label";
+    label.textContent = "Who won?";
+
+    const winRow = document.createElement("div");
+    winRow.className = "win-buttons";
+    winRow.append(
+      makeButton("win-button is-row", rowDeck, () => recordResult(rowIndex, colIndex, "row")),
+      makeButton("win-button is-column", columnDeck, () => recordResult(rowIndex, colIndex, "column"))
+    );
+    winRow.children[0].insertAdjacentHTML("beforeend", `<small>${PLAYER_NAMES.row}</small>`);
+    winRow.children[1].insertAdjacentHTML("beforeend", `<small>${PLAYER_NAMES.column}</small>`);
+
+    popover.append(closeButton, title, stats, label, winRow);
+
+    if (activeEditor.revealGamesEditor) {
+      const warning = document.createElement("p");
+      warning.className = "editor-mode-label is-warning";
+      warning.textContent = "Fixing the games count only. Wins stay the same.";
+
+      const editorRow = document.createElement("div");
+      editorRow.className = "editor-row";
+      const editValue = document.createElement("span");
+      editValue.className = "editor-value";
+      editValue.textContent = String(record.games);
+      editorRow.append(
+        makeButton("editor-button", "-", () => nudgeGames(rowIndex, colIndex, -1)),
+        editValue,
+        makeButton("editor-button", "+", () => nudgeGames(rowIndex, colIndex, 1))
+      );
+      popover.append(warning, editorRow);
+    } else {
+      popover.append(
+        makeButton("editor-reveal-button", "Fix no. of games played", () => {
+          activeEditor = { row: rowIndex, col: colIndex, revealGamesEditor: true };
+          render();
+        })
+      );
+    }
+
     cell.classList.add("is-editing");
     shell.append(popover);
   }
@@ -949,24 +1161,83 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
   return cell;
 }
 
-function saveStatusLabel() {
-  if (saveStatus === "pending") return "Pending changes";
-  if (saveStatus === "saving") return "Saving...";
-  if (saveStatus === "saved") return "Saved";
-  if (saveStatus === "error") return "Save failed";
-  return "Synced";
+// Menu button; holds theme, account and sign out. Sync problems show in the banner instead.
+function menuMarkup() {
+  return `<div class="menu-anchor">
+    <button class="tool-button icon-button ${accountOpen ? "active" : ""}" type="button" data-account-toggle
+      aria-label="Menu" title="Menu" aria-expanded="${accountOpen}">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+    </button>
+    ${
+      accountOpen
+        ? `<div class="controls-popover account-popover" data-account-popover>
+            <section class="controls-section">
+              <p class="controls-title">Display</p>
+              <button class="mode-toggle" type="button" data-theme-toggle>${isDarkMode ? "Switch to light mode" : "Switch to dark mode"}</button>
+            </section>
+            <section class="controls-section">
+              <p class="controls-title">Account</p>
+              <p class="user-chip">${escapeHtml(currentUser.email)}</p>
+              <form class="password-form" data-password-form>
+                <label class="filter-field">${passwordRecovery ? "Choose a new password" : "Change password"}
+                  <input type="password" name="password" minlength="6" autocomplete="new-password" required />
+                </label>
+                <button class="mode-toggle" type="submit">Save password</button>
+                ${passwordMessage ? `<p class="subtle">${escapeHtml(passwordMessage)}</p>` : ""}
+              </form>
+              <button class="mode-toggle mode-signout" type="button" data-signout>Sign out</button>
+            </section>
+          </div>`
+        : ""
+    }
+  </div>`;
+}
+
+function syncBannerMarkup() {
+  const unsaved = pendingCellOps.length;
+  const unsavedText = unsaved === 1 ? "1 change is" : `${unsaved} changes are`;
+  let message = "";
+
+  if (!navigator.onLine) {
+    message = unsaved
+      ? `You're offline. ${unsavedText} waiting on this phone and will be sent when you're back online. Keep the app open until then.`
+      : "You're offline. Games can't be saved or received until you're back online.";
+  } else if (saveStatus === "error") {
+    message = unsaved
+      ? `${unsavedText} not saved yet. Retrying automatically.`
+      : "Deck changes are not saved yet. Retrying automatically.";
+  } else if (liveWasLost && liveStatus !== "live") {
+    message = "Live updates paused. Reconnecting. You'll get the other phone's games when it's back.";
+  }
+
+  if (!message) return "";
+  return `<div class="sync-banner" role="alert">
+    <span>${message}</span>
+    ${navigator.onLine ? '<button type="button" class="banner-button" data-sync-retry>Retry now</button>' : ""}
+  </div>`;
 }
 
 function activeFilterLabel() {
-  if (highlightMode === "good") {
-    return `Good matchups | max diff <= ${scoreMaxDiffFilter}, games >= ${scoreMinGamesFilter}`;
-  }
+  const mode = HIGHLIGHT_MODES.find(([id]) => id === highlightMode);
+  return mode ? `Color: ${mode[1]}` : "Color: none";
+}
 
-  if (highlightMode === "counters") {
-    return "Counters highlight";
-  }
+function swatch(color) {
+  return `<i class="legend-swatch" style="background:${color}" aria-hidden="true"></i>`;
+}
 
-  return "Highlight: none";
+function gridLegendMarkup() {
+  const colors = {
+    ahead: `<span>${PLAYER_NAMES.column} ahead</span>${swatch("var(--daniel)")}${swatch("var(--daniel-soft)")}${swatch(
+      "var(--mid)"
+    )}${swatch("var(--kasper-soft)")}${swatch("var(--kasper)")}<span>${PLAYER_NAMES.row} ahead</span>`,
+    clear: `${swatch("var(--kasper)")}<span>${PLAYER_NAMES.row}'s deck is better</span>${swatch(
+      "var(--daniel)"
+    )}<span>${PLAYER_NAMES.column}'s deck is better</span><span>(${clearMinGamesFilter}+ games, ${clearMinDiffFilter}+ wins apart)</span>`,
+    few: `${swatch("var(--few-highlight)")}<span>${fewMaxGamesFilter} games or fewer</span>`
+  }[highlightMode];
+
+  return colors ? `<div class="grid-legend">${colors}</div>` : "";
 }
 
 function positionActiveEditorPopover() {
@@ -994,11 +1265,15 @@ function positionActiveEditorPopover() {
   popover.style.top = `${Math.round(top)}px`;
 }
 
-function captureGridScrollPosition() {
+function captureScrollPositions() {
   const gridWrap = app.querySelector(".grid-wrap");
-  if (!gridWrap) return;
-  gridScrollLeft = gridWrap.scrollLeft;
-  gridScrollTop = gridWrap.scrollTop;
+  if (gridWrap) {
+    gridScrollLeft = gridWrap.scrollLeft;
+    gridScrollTop = gridWrap.scrollTop;
+  }
+
+  const view = app.querySelector("[data-view]");
+  if (view) viewScrollTop[view.dataset.view] = view.scrollTop;
 }
 
 function restoreGridScrollPosition() {
@@ -1020,18 +1295,39 @@ function renderAuthScreen(configError) {
             : ""
         }
         ${authError ? `<p class="auth-error">${authError}</p>` : ""}
+        ${authNotice ? `<p class="auth-notice">${escapeHtml(authNotice)}</p>` : ""}
         <form class="auth-form" data-auth-form>
           <label>Email<input type="email" name="email" required /></label>
           <label>Password<input type="password" name="password" required /></label>
           <button type="submit" ${authBusy || configError ? "disabled" : ""}>${
             authBusy ? "Signing in..." : "Sign in"
           }</button>
+          <button type="button" class="link-button" data-forgot-password ${configError ? "disabled" : ""}>Forgot password?</button>
         </form>
       </section>
     </main>
   `;
 
   const form = app.querySelector("[data-auth-form]");
+  const forgotButton = app.querySelector("[data-forgot-password]");
+  if (forgotButton && !configError) {
+    forgotButton.addEventListener("click", async () => {
+      const email = String(new FormData(form).get("email") || "").trim();
+      if (!email) {
+        authError = "Type your email first, then tap Forgot password.";
+        authNotice = "";
+        render();
+        return;
+      }
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin + window.location.pathname
+      });
+      authError = error ? error.message : "";
+      authNotice = error ? "" : "Check your email for a link to set a new password.";
+      render();
+    });
+  }
+
   if (form && !configError) {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1053,277 +1349,351 @@ function renderAuthScreen(configError) {
   }
 }
 
-function renderTableScreen() {
-  const rowTotals = getRowTotals();
-  const columnTotals = getColumnTotals();
-  const rowGameTotals = getRowGameTotals();
-  const columnGameTotals = getColumnGameTotals();
+function playerDot(axis) {
+  return `<i class="player-dot is-${axis}" aria-hidden="true"></i>`;
+}
 
-  app.innerHTML = `
-    <main class="page-shell">
-      <section class="panel">
-        <div class="grid-wrap">
-          <table class="matchup-table">
-            <thead>
-              <tr>
-                <th class="corner-cell ${accountOpen || highlightOpen ? "controls-open" : ``}"><div class="corner-cell-inner">
-                  <div class="top-mini-actions">
-                    <button class="mode-toggle mode-account-small ${accountOpen ? "active" : ""}" type="button" data-account-toggle>
-                      Account
-                    </button>
-                    <button class="theme-toggle mode-theme-small" type="button" data-theme-toggle>
-                      ${isDarkMode ? "Light" : "Dark"}
-                    </button>
-                  </div>
-                  <button class="mode-toggle mode-view mode-main" type="button" data-display-toggle>
-                    ${displayMode === "games" ? "Mode: # of games" : "Mode: Score"}
-                  </button>
-                  <button class="mode-toggle mode-highlight-main ${highlightOpen ? "active" : ""}" type="button" data-highlight-toggle>
-                    Highlight
-                  </button>
-                  <p class="view-mode-chip">${activeFilterLabel()}</p>
-                  <div class="sort-mini-wrap">
-                    <button class="sort-mini ${sortMode === "wins" ? "active" : ""}" type="button" data-wins-sort title="Sort by most wins">W</button>
-                    <button class="sort-mini ${sortMode === "games" ? "active" : ""}" type="button" data-games-sort title="Sort by most played">G</button>
-                  </div>
-                  ${
-                    accountOpen
-                      ? `<div class="controls-popover account-popover" data-account-popover>
-                          <section class="controls-section">
-                            <p class="controls-title">Account</p>
-                            <p class="user-chip">${currentUser.email}</p>
-                            <p class="save-chip ${saveStatus}">${saveStatusLabel()}</p>
-                            <div class="controls-actions two-col">
-                              <button class="mode-toggle mode-signout" type="button" data-signout>
-                                Sign out
-                              </button>
-                            </div>
-                          </section>
-                        </div>`
-                      : ""
-                  }
-                  ${
-                    highlightOpen
-                      ? `<div class="controls-popover highlight-popover" data-highlight-popover>
-                          <section class="controls-section">
-                            <div class="controls-header">
-                              <p class="controls-title">Highlight</p>
-                              <button class="controls-close" type="button" data-highlight-close aria-label="Close highlight panel">X</button>
-                            </div>
-                            <div class="controls-actions two-col">
-                              <button class="mode-toggle mode-filter ${
-                                highlightMode === "good" ? "active" : ""
-                              }" type="button" data-highlight-good>
-                                Good matchups
-                              </button>
-                              <button class="mode-toggle mode-filter ${
-                                highlightMode === "counters" ? "active" : ""
-                              }" type="button" data-highlight-counters>
-                                Counters
-                              </button>
-                            </div>
-                            ${
-                              highlightMode === "good"
-                                ? `<div class="filter-wrap">
-                                    <label class="filter-field">Max score diff <=
-                                      <input type="number" min="0" value="${scoreMaxDiffFilter}" data-filter-score-max-diff />
-                                    </label>
-                                    <label class="filter-field">Min number of games >=
-                                      <input type="number" min="0" value="${scoreMinGamesFilter}" data-filter-score-min-games />
-                                    </label>
-                                  </div>`
-                                : highlightMode === "counters"
-                                  ? `<p class="subtle"></p>`
-                                  : `<p class="subtle">No highlight active</p>`
-                            }
-                          </section>
-                        </div>`
-                      : ""
-                  }
-                </div></th>
-                ${state.columnDecks.map((_, index) => `<th data-col="${index}"></th>`).join("")}
-                <th class="sum-col">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${state.rowDecks
-                .map(
-                  (_, rowIndex) => `
-                  <tr data-row="${rowIndex}">
-                    <th data-row-header="${rowIndex}"></th>
-                    ${state.columnDecks
-                      .map((_, colIndex) => `<td data-cell="${rowIndex}-${colIndex}"></td>`)
-                      .join("")}
-                    <td class="sum-cell right-total-cell ${scoreClass(rowTotals[rowIndex])}">
-                      <span class="sum-score">${
-                        displayMode === "games" ? rowGameTotals[rowIndex] : rowTotals[rowIndex]
-                      }</span>
-                    </td>
-                  </tr>
-                `
-                )
-                .join("")}
-            </tbody>
-            <tfoot>
-              <tr>
-                <th class="sum-row-label">Total</th>
-                ${columnTotals
-                  .map(
-                    (value, colIndex) =>
-                      `<td class="sum-cell ${scoreClass(value)}"><span class="sum-score">${
-                        displayMode === "games" ? columnGameTotals[colIndex] : value
-                      }</span></td>`
-                  )
-                  .join("")}
-                <td class="sum-corner"></td>
-              </tr>
-            </tfoot>
-          </table>
+function segmentedMarkup(options, current, attribute) {
+  return `<div class="segmented" role="tablist">${options
+    .map(
+      ([value, label]) =>
+        `<button type="button" role="tab" aria-selected="${value === current}" class="${
+          value === current ? "on" : ""
+        }" ${attribute}="${value}">${label}</button>`
+    )
+    .join("")}</div>`;
+}
+
+function renderLogView() {
+  const { rowIndex, colIndex } = getLogIndexes();
+  const rowDeck = state.rowDecks[rowIndex];
+  const columnDeck = state.columnDecks[colIndex];
+  const cellData = state.matrix[rowIndex][colIndex];
+  const record = getRecord(cellData);
+  const verdict = pairVerdict(cellData, rowIndex, colIndex);
+
+  // Listed A–Z; each option keeps its deck's grid position as its value.
+  const options = (decks, selected) =>
+    decks
+      .map((name, index) => ({ name, index }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }))
+      .map(({ name, index }) => `<option value="${index}" ${index === selected ? "selected" : ""}>${escapeHtml(name)}</option>`)
+      .join("");
+
+  const recent = sessionLog.slice(0, 8);
+
+  return `
+    <section class="view-stack">
+      <div class="view-head">
+        <h2>New game</h2>
+        ${menuMarkup()}
+      </div>
+      <label class="deck-picker">
+        <span class="picker-label">${playerDot("row")}${PLAYER_NAMES.row}'s deck</span>
+        <select data-log-row>${options(state.rowDecks, rowIndex)}</select>
+      </label>
+      <p class="vs-mark">vs</p>
+      <label class="deck-picker">
+        <span class="picker-label">${playerDot("column")}${PLAYER_NAMES.column}'s deck</span>
+        <select data-log-column>${options(state.columnDecks, colIndex)}</select>
+      </label>
+
+      <article class="card h2h-card">
+        <div class="h2h-score">
+          <div class="h2h-side"><b class="ink-row">${record.rowWins}</b><span>${PLAYER_NAMES.row}</span></div>
+          <div class="h2h-mid">
+            <span>${record.games} ${record.games === 1 ? "game" : "games"}</span>
+            <span class="verdict-chip is-${verdict.kind}">${escapeHtml(verdict.label)}</span>
+          </div>
+          <div class="h2h-side"><b class="ink-column">${record.columnWins}</b><span>${PLAYER_NAMES.column}</span></div>
         </div>
-      </section>
-    </main>
-  `;
+        ${splitBarMarkup(record.rowWins, record.columnWins)}
+        <p class="h2h-note">${escapeHtml(leadText(record, rowIndex, colIndex))}</p>
+      </article>
 
+      <p class="section-label">Who won?</p>
+      <div class="win-buttons">
+        <button type="button" class="win-button is-row" data-win="row">${escapeHtml(rowDeck)}<small>${PLAYER_NAMES.row}</small></button>
+        <button type="button" class="win-button is-column" data-win="column">${escapeHtml(columnDeck)}<small>${PLAYER_NAMES.column}</small></button>
+      </div>
+      <div class="two-buttons">
+        <button type="button" class="ghost-button" data-undo ${sessionLog.length ? "" : "disabled"}>Undo last game</button>
+        <button type="button" class="ghost-button" data-suggest>Suggest a matchup</button>
+      </div>
+
+      <p class="section-label">This session</p>
+      <div class="card list">
+        ${
+          recent.length
+            ? recent
+                .map((entry) => {
+                  const winnerDeck = entry.winner === "row" ? entry.rowDeck : entry.columnDeck;
+                  const loserDeck = entry.winner === "row" ? entry.columnDeck : entry.rowDeck;
+                  return `<div class="log-item">${playerDot(entry.winner)}<span>${escapeHtml(winnerDeck)} beat ${escapeHtml(loserDeck)}</span></div>`;
+                })
+                .join("")
+            : `<p class="empty-note">Games you log show up here. Undo removes the most recent one.</p>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderDeckDetail() {
+  const index = deckDetail.axis === "row" ? state.rowDecks.indexOf(deckDetail.name) : state.columnDecks.indexOf(deckDetail.name);
+  if (index === -1) {
+    deckDetail = null;
+    return renderDecksView();
+  }
+
+  const summary = getDeckSummary(deckDetail.axis, index);
+  const matchups = [...summary.matchups].sort(
+    (a, b) => (b.games > 0) - (a.games > 0) || (b.rate ?? -1) - (a.rate ?? -1) || b.games - a.games
+  );
+
+  return `
+    <section class="view-stack">
+      <button type="button" class="back-link" data-deck-back>‹ All decks</button>
+      <div class="view-head">
+        <h2>${escapeHtml(summary.name)}</h2>
+        <span class="owner-chip">${playerDot(summary.axis)}${PLAYER_NAMES[summary.axis]}</span>
+      </div>
+      <div class="stat-tiles">
+        <div class="stat-tile"><span>Win rate</span><b>${formatRate(summary.rate)}</b></div>
+        <div class="stat-tile"><span>Record</span><b>${summary.wins}–${summary.losses}</b></div>
+        <div class="stat-tile"><span>Games</span><b>${summary.games}</b></div>
+      </div>
+      <p class="section-label">Matchups, best first · tap one to log a game</p>
+      <div class="card list">
+        ${matchups
+          .map((matchup) => {
+            const verdict = deckVerdict(summary.axis, matchup.cellData);
+            return `<button type="button" class="list-row matchup-row" data-log-pair="${matchup.rowIndex}:${matchup.colIndex}">
+              <span class="list-main">
+                <span class="list-name">${escapeHtml(matchup.opponent)}</span>
+                <span class="list-sub">${matchup.wins}–${matchup.losses} · ${matchup.games} ${matchup.games === 1 ? "game" : "games"}</span>
+              </span>
+              <span class="verdict-chip is-${verdict.kind}">${verdict.label}</span>
+              <span class="list-rate">${formatRate(matchup.rate)}</span>
+            </button>`;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderDecksView() {
+  if (deckDetail) return renderDeckDetail();
+
+  const axes = decksAxis === "both" ? ["row", "column"] : [decksAxis];
+  const showOwner = axes.length > 1;
+  const decks = axes
+    .flatMap((axis) => (axis === "row" ? state.rowDecks : state.columnDecks).map((_, index) => getDeckSummary(axis, index)))
+    .sort((a, b) => (b.rate ?? -1) - (a.rate ?? -1) || b.games - a.games);
+
+  return `
+    <section class="view-stack">
+      <div class="view-head">
+        <h2>Win rates</h2>
+        ${menuMarkup()}
+      </div>
+      ${segmentedMarkup(
+        [
+          ["both", "Both"],
+          ["row", PLAYER_NAMES.row],
+          ["column", PLAYER_NAMES.column]
+        ],
+        decksAxis,
+        "data-decks-axis"
+      )}
+      <div class="card list">
+        ${decks
+          .map(
+            (deck, rank) => `<button type="button" class="list-row deck-row" data-open-deck="${deck.axis}:${deck.index}">
+              <span class="list-rank">${rank + 1}</span>
+              <span class="list-main">
+                <span class="list-name">${showOwner ? playerDot(deck.axis) : ""}${escapeHtml(deck.name)}</span>
+                <span class="list-sub">${showOwner ? `${PLAYER_NAMES[deck.axis]} · ` : ""}${deck.wins}–${deck.losses} · ${deck.games} ${
+                  deck.games === 1 ? "game" : "games"
+                }</span>
+                <span class="rate-bar"><i class="is-${deck.axis}" style="width:${deck.rate ?? 0}%"></i></span>
+              </span>
+              <span class="list-rate">${formatRate(deck.rate)}</span>
+            </button>`
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function highlightSettingsMarkup() {
+  const numberField = (kind, label) =>
+    `<label class="filter-field">${label}
+      <input type="number" min="${FILTER_LIMITS[kind].min}" value="${getFilterValue(kind)}" data-filter="${kind}" />
+    </label>`;
+
+  if (highlightMode === "clear") {
+    return `<div class="filter-wrap">${numberField("clearMinGames", "Min number of games >=")}${numberField(
+      "clearMinDiff",
+      "Min win difference >="
+    )}<p class="subtle">Blue: ${PLAYER_NAMES.row}'s deck is better. Orange: ${PLAYER_NAMES.column}'s deck is better.</p></div>`;
+  }
+
+  if (highlightMode === "few") {
+    return `<div class="filter-wrap">${numberField("fewMaxGames", "Games played <=")}</div>`;
+  }
+
+  if (highlightMode === "ahead") {
+    return `<p class="subtle">Blue: ${PLAYER_NAMES.row}'s deck leads. Orange: ${PLAYER_NAMES.column}'s deck leads. Darker means a bigger lead, gray is even.</p>`;
+  }
+  return `<p class="subtle">No colors active</p>`;
+}
+
+function renderGridView() {
+  // Each deck's own record against all opponents.
+  const totalValue = (axis, index) => {
+    const summary = getDeckSummary(axis, index);
+    return `${summary.wins}-${summary.losses}`;
+  };
+
+  const highlightButton = ([mode, label]) =>
+    `<button class="mode-toggle mode-filter ${highlightMode === mode ? "active" : ""}" type="button" data-highlight-mode="${mode}">${label}</button>`;
+
+  return `
+    <section class="panel">
+      <div class="grid-toolbar">
+        <div class="grid-tools">
+          <button class="tool-button icon-button ${gridExpanded ? "active" : ""}" type="button" data-grid-fullscreen
+            aria-pressed="${gridExpanded}" aria-label="${gridExpanded ? "Exit full screen" : "Full screen"}" title="${
+              gridExpanded ? "Exit full screen" : "Full screen"
+            }">
+            <svg viewBox="0 0 24 24" aria-hidden="true">${
+              gridExpanded
+                ? '<path d="M9 4v5H4"/><path d="M15 4v5h5"/><path d="M9 20v-5H4"/><path d="M15 20v-5h5"/>'
+                : '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>'
+            }</svg>
+          </button>
+          <div class="tool-center">
+            <button class="tool-button color-button ${highlightOpen ? "active" : ""}" type="button" data-highlight-toggle
+              aria-expanded="${highlightOpen}" aria-label="${activeFilterLabel()}">
+              <span class="tool-label">${activeFilterLabel().replace("Color: ", "")}</span>
+              <span aria-hidden="true">▾</span>
+            </button>
+            <label class="sort-picker ${sortMode !== "none" ? "active" : ""}">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16"/><path d="M3 16l4 4 4-4"/><path d="M17 20V4"/><path d="M13 8l4-4 4 4"/></svg>
+              <select data-grid-sort aria-label="Sort decks by">
+                ${SORT_MODES.map(([mode, label]) => `<option value="${mode}" ${mode === sortMode ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </label>
+          </div>
+          ${menuMarkup()}
+        </div>
+        ${
+          highlightOpen
+            ? `<div class="controls-popover highlight-popover" data-highlight-popover>
+                <section class="controls-section">
+                  <div class="controls-header">
+                    <p class="controls-title">Color cells by</p>
+                    <button class="controls-close" type="button" data-highlight-close aria-label="Close color panel">X</button>
+                  </div>
+                  <div class="controls-actions two-col">
+                    ${HIGHLIGHT_MODES.map(highlightButton).join("")}
+                  </div>
+                  ${highlightSettingsMarkup()}
+                </section>
+              </div>`
+            : ""
+        }
+      </div>
+      ${gridLegendMarkup()}
+      <div class="grid-wrap">
+        <table class="matchup-table">
+          <thead>
+            <tr>
+              <th class="grid-corner">
+                <span>${playerDot("row")}${PLAYER_NAMES.row} ↓</span>
+                <span>${playerDot("column")}${PLAYER_NAMES.column} →</span>
+              </th>
+              ${state.columnDecks.map((_, index) => `<th data-col="${index}"></th>`).join("")}
+              <th class="sum-col"><span>Total</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${state.rowDecks
+              .map(
+                (_, rowIndex) => `
+                <tr data-row="${rowIndex}">
+                  <th data-row-header="${rowIndex}"></th>
+                  ${state.columnDecks.map((__, colIndex) => `<td data-cell="${rowIndex}-${colIndex}"></td>`).join("")}
+                  <td class="sum-cell">${totalValue("row", rowIndex)}</td>
+                </tr>
+              `
+              )
+              .join("")}
+          </tbody>
+          <tfoot>
+            <tr>
+              <th class="sum-row-label">Total</th>
+              ${state.columnDecks
+                .map((_, colIndex) => `<td class="sum-cell">${totalValue("column", colIndex)}</td>`)
+                .join("")}
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function bindGridView() {
   state.columnDecks.forEach((name, index) => {
     const placeholder = app.querySelector(`[data-col="${index}"]`);
-    if (placeholder) {
-      placeholder.replaceWith(buildHeaderCell(name, "column", index));
-    }
+    if (placeholder) placeholder.replaceWith(buildHeaderCell(name, "column", index));
   });
 
   state.rowDecks.forEach((name, index) => {
     const placeholder = app.querySelector(`[data-row-header="${index}"]`);
-    if (placeholder) {
-      placeholder.replaceWith(buildHeaderCell(name, "row", index));
-    }
+    if (placeholder) placeholder.replaceWith(buildHeaderCell(name, "row", index));
   });
 
   state.matrix.forEach((row, rowIndex) => {
     row.forEach((cellData, colIndex) => {
       const placeholder = app.querySelector(`[data-cell="${rowIndex}-${colIndex}"]`);
-      if (placeholder) {
-        placeholder.replaceWith(buildScoreCell(rowIndex, colIndex, cellData));
-      }
+      if (placeholder) placeholder.replaceWith(buildScoreCell(rowIndex, colIndex, cellData));
     });
   });
 
-  const themeToggle = app.querySelector("[data-theme-toggle]");
-  if (themeToggle) themeToggle.addEventListener("click", toggleTheme);
+  onClick("[data-highlight-toggle]", () => {
+    highlightOpen = !highlightOpen;
+    accountOpen = false;
+    render();
+  });
 
-  const accountToggle = app.querySelector("[data-account-toggle]");
-  if (accountToggle) {
-    accountToggle.addEventListener("click", (event) => {
+  onClick("[data-highlight-close]", () => {
+    highlightOpen = false;
+    render();
+  });
+
+  onClick("[data-grid-fullscreen]", toggleGridFullscreen);
+  const sortSelect = app.querySelector("[data-grid-sort]");
+  if (sortSelect) {
+    sortSelect.addEventListener("click", (event) => event.stopPropagation());
+    sortSelect.addEventListener("change", (event) => applyGridSort(event.target.value));
+  }
+  onClick("[data-highlight-mode]", (el) => toggleHighlightMode(el.dataset.highlightMode));
+
+  app.querySelectorAll("[data-filter]").forEach((input) => {
+    input.addEventListener("change", (event) => {
       event.stopPropagation();
-      openAccountPanel();
+      setFilterValue(input.dataset.filter, event.target.value);
     });
-  }
-
-  const highlightToggle = app.querySelector("[data-highlight-toggle]");
-  if (highlightToggle) {
-    highlightToggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openHighlightPanel();
-    });
-  }
-
-  const accountPopover = app.querySelector("[data-account-popover]");
-  if (accountPopover) {
-    accountPopover.addEventListener("click", (event) => event.stopPropagation());
-  }
+  });
 
   const highlightPopover = app.querySelector("[data-highlight-popover]");
-  if (highlightPopover) {
-    highlightPopover.addEventListener("click", (event) => event.stopPropagation());
-  }
-
-  const highlightCloseButton = app.querySelector("[data-highlight-close]");
-  if (highlightCloseButton) {
-    highlightCloseButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      highlightOpen = false;
-      render();
-    });
-  }
-
-  const signOutButton = app.querySelector("[data-signout]");
-  if (signOutButton) {
-    signOutButton.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await supabase.auth.signOut();
-    });
-  }
-
-  const displayToggle = app.querySelector("[data-display-toggle]");
-  if (displayToggle) {
-    displayToggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggleDisplayMode();
-    });
-  }
-
-  const gamesSortToggle = app.querySelector("[data-games-sort]");
-  if (gamesSortToggle) {
-    gamesSortToggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      sortByMostPlayed();
-    });
-  }
-
-  const winsSortToggle = app.querySelector("[data-wins-sort]");
-  if (winsSortToggle) {
-    winsSortToggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      sortByMostWins();
-    });
-  }
-
-  const goodHighlightToggle = app.querySelector("[data-highlight-good]");
-  if (goodHighlightToggle) {
-    goodHighlightToggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggleHighlightMode("good");
-    });
-  }
-
-  const countersHighlightToggle = app.querySelector("[data-highlight-counters]");
-  if (countersHighlightToggle) {
-    countersHighlightToggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggleHighlightMode("counters");
-    });
-  }
-
-  const scoreMaxDiffInput = app.querySelector("[data-filter-score-max-diff]");
-  if (scoreMaxDiffInput) {
-    scoreMaxDiffInput.addEventListener("change", (event) => {
-      event.stopPropagation();
-      setFilterValue("scoreMaxDiff", event.target.value);
-    });
-  }
-
-  const scoreMinGamesInput = app.querySelector("[data-filter-score-min-games]");
-  if (scoreMinGamesInput) {
-    scoreMinGamesInput.addEventListener("change", (event) => {
-      event.stopPropagation();
-      setFilterValue("scoreMinGames", event.target.value);
-    });
-  }
-
-  const gamesMinInput = app.querySelector("[data-filter-games-min]");
-  if (gamesMinInput) {
-    gamesMinInput.addEventListener("change", (event) => {
-      event.stopPropagation();
-      setFilterValue("gamesMin", event.target.value);
-    });
-  }
-
-  const gamesMaxInput = app.querySelector("[data-filter-games-max]");
-  if (gamesMaxInput) {
-    gamesMaxInput.addEventListener("change", (event) => {
-      event.stopPropagation();
-      setFilterValue("gamesMax", event.target.value);
-    });
-  }
+  if (highlightPopover) highlightPopover.addEventListener("click", (event) => event.stopPropagation());
 
   const gridWrap = app.querySelector(".grid-wrap");
   if (gridWrap) {
@@ -1333,41 +1703,151 @@ function renderTableScreen() {
       () => {
         gridScrollLeft = gridWrap.scrollLeft;
         gridScrollTop = gridWrap.scrollTop;
-        if (activeEditor) {
-          positionActiveEditorPopover();
-        }
+        if (activeEditor) positionActiveEditorPopover();
       },
       { passive: true }
     );
   }
 
-  const shell = app.querySelector(".page-shell");
-  if (shell) {
-    shell.addEventListener("click", (event) => {
-      const target = event.target;
-      const targetEl = target instanceof Element ? target : null;
-      if (targetEl && targetEl.closest("[data-highlight-popover]")) return;
-      if (targetEl && targetEl.closest("[data-account-popover]")) return;
-      if (targetEl && targetEl.closest("[data-highlight-toggle]")) return;
-      if (targetEl && targetEl.closest("[data-account-toggle]")) return;
-      if (accountOpen || highlightOpen) {
-        accountOpen = false;
-        highlightOpen = false;
-      }
-      if (activeEditor) {
-        activeEditor = null;
-      }
+  if (activeEditor) positionActiveEditorPopover();
+}
+
+function renderAtTop() {
+  render();
+  const view = app.querySelector("[data-view]");
+  if (view) view.scrollTop = 0;
+}
+
+function onClick(selector, handler) {
+  app.querySelectorAll(selector).forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.stopPropagation();
+      handler(el);
+    });
+  });
+}
+
+function bindSharedEvents() {
+  onClick("[data-tab]", (el) => setActiveTab(el.dataset.tab));
+  onClick("[data-theme-toggle]", toggleTheme);
+  onClick("[data-account-toggle]", () => {
+    accountOpen = !accountOpen;
+    highlightOpen = false;
+    render();
+  });
+
+  const accountPopover = app.querySelector("[data-account-popover]");
+  if (accountPopover) accountPopover.addEventListener("click", (event) => event.stopPropagation());
+
+  onClick("[data-signout]", async () => {
+    await supabase.auth.signOut();
+  });
+
+  onClick("[data-sync-retry]", retrySyncNow);
+
+  const passwordForm = app.querySelector("[data-password-form]");
+  if (passwordForm) {
+    passwordForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const password = String(new FormData(passwordForm).get("password") || "");
+      const { error } = await supabase.auth.updateUser({ password });
+      passwordMessage = error ? `Could not change password: ${error.message}` : "Password changed.";
+      if (!error) passwordRecovery = false;
+      accountOpen = true;
       render();
     });
   }
 
-  if (activeEditor) {
-    positionActiveEditorPopover();
+  onClick("[data-win]", (el) => {
+    const { rowIndex, colIndex } = getLogIndexes();
+    recordResult(rowIndex, colIndex, el.dataset.win);
+  });
+  onClick("[data-undo]", undoLastResult);
+  onClick("[data-suggest]", suggestLeastPlayedPair);
+
+  const rowSelect = app.querySelector("[data-log-row]");
+  if (rowSelect) {
+    rowSelect.addEventListener("change", (event) => {
+      logPick.rowDeck = state.rowDecks[Number(event.target.value)];
+      logPick.columnDeck = state.columnDecks[getLogIndexes().colIndex];
+      render();
+    });
+  }
+
+  const columnSelect = app.querySelector("[data-log-column]");
+  if (columnSelect) {
+    columnSelect.addEventListener("change", (event) => {
+      logPick.columnDeck = state.columnDecks[Number(event.target.value)];
+      logPick.rowDeck = state.rowDecks[getLogIndexes().rowIndex];
+      render();
+    });
+  }
+
+  onClick("[data-decks-axis]", (el) => {
+    decksAxis = el.dataset.decksAxis;
+    render();
+  });
+  onClick("[data-open-deck]", (el) => {
+    const [axis, index] = el.dataset.openDeck.split(":");
+    deckDetail = { axis, name: deckNameFor(axis, Number(index)) };
+    renderAtTop();
+  });
+  onClick("[data-deck-back]", () => {
+    deckDetail = null;
+    renderAtTop();
+  });
+  onClick("[data-log-pair]", (el) => {
+    const [rowIndex, colIndex] = el.dataset.logPair.split(":").map(Number);
+    openPairInLog(rowIndex, colIndex);
+  });
+
+
+  const shell = app.querySelector(".app-shell");
+  if (shell) {
+    shell.addEventListener("click", () => {
+      if (!accountOpen && !highlightOpen && !activeEditor) return;
+      accountOpen = false;
+      highlightOpen = false;
+      activeEditor = null;
+      render();
+    });
   }
 }
 
+function renderAppScreen() {
+  const views = {
+    log: renderLogView,
+    decks: renderDecksView,
+    grid: renderGridView
+  };
+
+  app.innerHTML = `
+    <div class="app-shell ${activeTab === "grid" && gridExpanded ? "is-expanded" : ""}">
+      <header class="app-header">${syncBannerMarkup()}</header>
+      <main class="app-view ${activeTab === "grid" ? "is-grid" : ""}" data-view="${activeTab}">
+        ${views[activeTab]()}
+      </main>
+      ${actionToast ? `<p class="toast" role="status">${escapeHtml(actionToast)}</p>` : ""}
+      <nav class="tab-bar" aria-label="Sections">
+        ${TABS.map(
+          (tab) =>
+            `<button type="button" class="tab-button ${tab.id === activeTab ? "on" : ""}" data-tab="${tab.id}" ${
+              tab.id === activeTab ? 'aria-current="page"' : ""
+            } aria-label="${tab.label}" title="${tab.label}"><svg viewBox="0 0 24 24" aria-hidden="true">${tab.icon}</svg></button>`
+        ).join("")}
+      </nav>
+    </div>
+  `;
+
+  const view = app.querySelector("[data-view]");
+  if (view) view.scrollTop = viewScrollTop[activeTab] || 0;
+
+  if (activeTab === "grid") bindGridView();
+  bindSharedEvents();
+}
+
 function render() {
-  captureGridScrollPosition();
+  captureScrollPositions();
 
   if (isInitializing) {
     app.innerHTML = `<main class="auth-shell"><section class="auth-card"><p>Loading...</p></section></main>`;
@@ -1379,7 +1859,16 @@ function render() {
     return;
   }
 
-  renderTableScreen();
+  // Background sync redraws the screen; keep a half-typed password and its focus.
+  const passwordInput = app.querySelector("[data-password-form] input");
+  const typedPassword = passwordInput ? passwordInput.value : "";
+  const passwordFocused = passwordInput && document.activeElement === passwordInput;
+
+  renderAppScreen();
+
+  const nextPasswordInput = app.querySelector("[data-password-form] input");
+  if (nextPasswordInput && typedPassword) nextPasswordInput.value = typedPassword;
+  if (nextPasswordInput && passwordFocused) nextPasswordInput.focus();
 }
 
 async function handleSession(session) {
@@ -1399,6 +1888,7 @@ async function handleSession(session) {
     saveQueued = false;
     cellSyncInFlight = false;
     pendingCellOps = [];
+    sessionLog = [];
     if (saveTimer) {
       window.clearTimeout(saveTimer);
       saveTimer = null;
@@ -1425,7 +1915,7 @@ async function handleSession(session) {
   pendingCellOps = [];
   clearSaveRetryTimer();
   clearCellSyncRetryTimer();
-  clearUnsortedSnapshot();
+  clearUnsortedOrder();
 
   try {
     await loadRemoteState();
@@ -1449,8 +1939,28 @@ async function initApp() {
   const { data } = await supabase.auth.getSession();
   await handleSession(data.session);
 
-  supabase.auth.onAuthStateChange(async (_event, session) => {
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    if (event === "PASSWORD_RECOVERY") {
+      passwordRecovery = true;
+      accountOpen = true;
+      passwordMessage = "Choose a new password below.";
+    }
     await handleSession(session);
+  });
+
+  // Phones pause pages in the background; catch up and flush unsaved games when it comes back.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") retrySyncNow();
+  });
+  window.addEventListener("online", () => {
+    retrySyncNow();
+    render();
+  });
+  window.addEventListener("offline", render);
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasUnsavedChanges()) return;
+    event.preventDefault();
+    event.returnValue = "";
   });
 
   isInitializing = false;
