@@ -1762,7 +1762,7 @@ select:focus-visible {
   bottom: calc(50% - 90px);
 }
 
-/* Game menu: winner buttons sit in their own box, well apart from restart and close */
+/* Game menu: winner buttons in their own box at the top; back, restart and close below a divider */
 .game-menu-result {
   display: grid;
   gap: 0.6rem;
@@ -1780,7 +1780,11 @@ select:focus-visible {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
-  margin-top: 1.25rem;
+  margin-top: 1rem;
   padding-top: 1.25rem;
   border-top: 1px solid var(--border);
+}
+
+.game-menu-actions .is-wide {
+  grid-column: 1 / -1;
 }

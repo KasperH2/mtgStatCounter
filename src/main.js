@@ -1363,8 +1363,6 @@ function segmentedMarkup(options, current, attribute) {
 
 function renderLogView() {
   const { rowIndex, colIndex } = getLogIndexes();
-  const rowDeck = state.rowDecks[rowIndex];
-  const columnDeck = state.columnDecks[colIndex];
   const cellData = state.matrix[rowIndex][colIndex];
   const record = getRecord(cellData);
   const verdict = pairVerdict(cellData, rowIndex, colIndex);
@@ -1376,8 +1374,6 @@ function renderLogView() {
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }))
       .map(({ name, index }) => `<option value="${index}" ${index === selected ? "selected" : ""}>${escapeHtml(name)}</option>`)
       .join("");
-
-  const recent = sessionLog.slice(0, 8);
 
   return `
     <section class="view-stack">
@@ -1410,11 +1406,6 @@ function renderLogView() {
 
       <button type="button" class="start-game-button" data-start-game>Start game</button>
 
-      <p class="section-label">Or log a result</p>
-      <div class="win-buttons">
-        <button type="button" class="win-button is-row" data-win="row">${escapeHtml(rowDeck)}<small>${PLAYER_NAMES.row}</small></button>
-        <button type="button" class="win-button is-column" data-win="column">${escapeHtml(columnDeck)}<small>${PLAYER_NAMES.column}</small></button>
-      </div>
       <div class="two-buttons">
         <button type="button" class="ghost-button" data-undo ${sessionLog.length ? "" : "disabled"}>Undo last game</button>
         <button type="button" class="ghost-button" data-suggest>Suggest a matchup</button>
@@ -1423,15 +1414,15 @@ function renderLogView() {
       <p class="section-label">This session</p>
       <div class="card list">
         ${
-          recent.length
-            ? recent
+          sessionLog.length
+            ? sessionLog
                 .map((entry) => {
                   const winnerDeck = entry.winner === "row" ? entry.rowDeck : entry.columnDeck;
                   const loserDeck = entry.winner === "row" ? entry.columnDeck : entry.rowDeck;
                   return `<div class="log-item">${playerDot(entry.winner)}<span>${escapeHtml(winnerDeck)} beat ${escapeHtml(loserDeck)}</span></div>`;
                 })
                 .join("")
-            : `<p class="empty-note">Games you log show up here. Undo removes the most recent one.</p>`
+            : `<p class="empty-note">Games you finish from Start game show up here. Undo removes the most recent one.</p>`
         }
       </div>
     </section>
@@ -1757,10 +1748,6 @@ function bindSharedEvents() {
     });
   }
 
-  onClick("[data-win]", (el) => {
-    const { rowIndex, colIndex } = getLogIndexes();
-    recordResult(rowIndex, colIndex, el.dataset.win);
-  });
   onClick("[data-start-game]", startGame);
   onClick("[data-undo]", undoLastResult);
   onClick("[data-suggest]", suggestLeastPlayedPair);
@@ -1925,9 +1912,9 @@ function gameMenuMarkup() {
   return `<div class="game-menu-backdrop" data-game-backdrop>
     <div class="game-menu" role="dialog" aria-label="Game menu">
       ${syncBannerMarkup()}
-      <button type="button" class="ghost-button" data-game-resume>Back to game</button>
       <div class="game-menu-result">${result}</div>
       <div class="game-menu-actions">
+        <button type="button" class="ghost-button is-wide" data-game-resume>Back to game</button>
         <button type="button" class="ghost-button" data-game-restart>${game.logged ? "Rematch" : "Restart game"}</button>
         <button type="button" class="ghost-button" data-game-close>Close game</button>
       </div>
