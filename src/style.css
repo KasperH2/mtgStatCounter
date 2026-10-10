@@ -36,6 +36,8 @@
   --alert-border: #de9999;
   --on-strong: #ffffff;
   --good-ink: #0a7d0a;
+  --start-bg: #1e3a64;
+  --start-ink: #ffffff;
 }
 
 :root[data-theme="dark"] {
@@ -74,6 +76,8 @@
   --alert-border: #7f4a4a;
   --on-strong: #ffffff;
   --good-ink: #4cc44c;
+  --start-bg: #23477a;
+  --start-ink: #eef4ff;
 }
 
 * {
@@ -1238,10 +1242,6 @@ select:focus-visible {
   font-weight: 700;
 }
 
-.sort-picker.active {
-  border-color: var(--focus);
-}
-
 .sort-picker select {
   min-width: 0;
   max-width: 100%;
@@ -1594,8 +1594,8 @@ select:focus-visible {
   min-height: 60px;
   border: 0;
   border-radius: 14px;
-  background: var(--focus);
-  color: var(--surface);
+  background: var(--start-bg);
+  color: var(--start-ink);
   font-family: var(--font-display);
   font-size: 1.25rem;
   font-weight: 700;
@@ -1760,4 +1760,27 @@ select:focus-visible {
 
 .game-toast {
   bottom: calc(50% - 90px);
+}
+
+/* Game menu: winner buttons sit in their own box, well apart from restart and close */
+.game-menu-result {
+  display: grid;
+  gap: 0.6rem;
+  margin-block: 0.75rem;
+  padding: 0.85rem;
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.game-menu-result .section-label {
+  margin: 0;
+}
+
+.game-menu-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
 }

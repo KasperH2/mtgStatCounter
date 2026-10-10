@@ -98,7 +98,8 @@ let scoreMaxDiffFilter = 2;
 let clearMinGamesFilter = 5;
 let clearMinDiffFilter = 4;
 let fewMaxGamesFilter = 0;
-let sortMode = "none";
+// The grid always shows decks sorted; the saved deck order is kept separately in unsortedOrder.
+let sortMode = "rate";
 let unsortedOrder = null;
 let highlightMode = "ahead";
 let accountOpen = false;
@@ -911,6 +912,7 @@ function getLayoutOrder() {
 function deckSortValue(axis, index, mode) {
   const summary = getDeckSummary(axis, index);
   if (mode === "diff") return summary.wins - summary.losses;
+  if (mode === "rate") return summary.rate ?? -1;
   return summary.games;
 }
 
@@ -925,14 +927,6 @@ function sortedDeckNames(axis, mode) {
 function applyGridSort(mode) {
   activeEditor = null;
 
-  if (mode === "none") {
-    if (unsortedOrder) reorderGrid(unsortedOrder.rowDecks, unsortedOrder.columnDecks);
-    clearUnsortedOrder();
-    sortMode = "none";
-    render();
-    return;
-  }
-
   if (!unsortedOrder) {
     unsortedOrder = { rowDecks: [...state.rowDecks], columnDecks: [...state.columnDecks] };
   }
@@ -943,7 +937,7 @@ function applyGridSort(mode) {
 }
 
 const SORT_MODES = [
-  ["none", "Original"],
+  ["rate", "Win rate"],
   ["diff", "Most wins"],
   ["games", "Most games"]
 ];
@@ -1586,7 +1580,7 @@ function renderGridView() {
               <span class="tool-label">${activeFilterLabel().replace("Color: ", "")}</span>
               <span aria-hidden="true">▾</span>
             </button>
-            <label class="sort-picker ${sortMode !== "none" ? "active" : ""}">
+            <label class="sort-picker">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16"/><path d="M3 16l4 4 4-4"/><path d="M17 20V4"/><path d="M13 8l4-4 4 4"/></svg>
               <select data-grid-sort aria-label="Sort decks by">
                 ${SORT_MODES.map(([mode, label]) => `<option value="${mode}" ${mode === sortMode ? "selected" : ""}>${label}</option>`).join("")}
@@ -1931,12 +1925,12 @@ function gameMenuMarkup() {
   return `<div class="game-menu-backdrop" data-game-backdrop>
     <div class="game-menu" role="dialog" aria-label="Game menu">
       ${syncBannerMarkup()}
-      ${result}
-      <div class="two-buttons">
+      <button type="button" class="ghost-button" data-game-resume>Back to game</button>
+      <div class="game-menu-result">${result}</div>
+      <div class="game-menu-actions">
         <button type="button" class="ghost-button" data-game-restart>${game.logged ? "Rematch" : "Restart game"}</button>
         <button type="button" class="ghost-button" data-game-close>Close game</button>
       </div>
-      <button type="button" class="ghost-button" data-game-resume>Back to game</button>
     </div>
   </div>`;
 }
