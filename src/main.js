@@ -313,16 +313,72 @@ function setActiveTab(tabId) {
   render();
 }
 
+// Player color choices: [strong, soft, ink] for light and dark mode. Strong fills buttons and grid
+// cells with a big lead, soft fills smaller leads and the life counter, ink is for text.
+const PLAYER_COLORS = {
+  blue: { label: "Blue", light: ["#2a78d6", "#9ec5f4", "#1c5cab"], dark: ["#3987e5", "#24456e", "#86b6ef"] },
+  orange: { label: "Orange", light: ["#eb6834", "#f6b99a", "#b4441a"], dark: ["#d95926", "#6b3a24", "#f39a72"] },
+  green: { label: "Dark green", light: ["#1f7a45", "#a8dcb9", "#145c33"], dark: ["#2b8f53", "#1c4630", "#7fd3a0"] },
+  purple: { label: "Purple", light: ["#7b4fd6", "#cdb8f5", "#5a35a8"], dark: ["#8c66e8", "#3a2d66", "#bba6f5"] },
+  red: { label: "Red", light: ["#d23b3b", "#f3b0b0", "#a12424"], dark: ["#d94848", "#5e2424", "#f29a9a"] },
+  teal: { label: "Teal", light: ["#128585", "#9fdcdc", "#0c6363"], dark: ["#1ea3a3", "#18484a", "#7fd6d6"] },
+  pink: { label: "Pink", light: ["#d6458f", "#f4b5d4", "#a52a6a"], dark: ["#e0559c", "#5c2443", "#f2a3c8"] },
+  gold: { label: "Gold", light: ["#c48200", "#f2d58f", "#7f5500"], dark: ["#d99a00", "#5a4512", "#f0c766"] }
+};
+const PLAYER_TOKEN = { row: "kasper", column: "daniel" };
+const DEFAULT_PLAYER_COLORS = { row: "blue", column: "orange" };
+
+function loadPlayerColors() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("mtg-colors") || "{}");
+    const colors = { ...DEFAULT_PLAYER_COLORS };
+    ["row", "column"].forEach((side) => {
+      if (PLAYER_COLORS[saved[side]]) colors[side] = saved[side];
+    });
+    return colors.row === colors.column ? { ...DEFAULT_PLAYER_COLORS } : colors;
+  } catch {
+    return { ...DEFAULT_PLAYER_COLORS };
+  }
+}
+
+let playerColors = loadPlayerColors();
+
+function applyPlayerColors() {
+  const root = document.documentElement;
+  ["row", "column"].forEach((side) => {
+    const [strong, soft, ink] = PLAYER_COLORS[playerColors[side]][isDarkMode ? "dark" : "light"];
+    const token = PLAYER_TOKEN[side];
+    root.style.setProperty(`--${token}`, strong);
+    root.style.setProperty(`--${token}-soft`, soft);
+    root.style.setProperty(`--${token}-ink`, ink);
+  });
+}
+
+function setPlayerColor(side, color) {
+  const other = side === "row" ? "column" : "row";
+  if (!PLAYER_COLORS[color] || playerColors[other] === color) return;
+  playerColors = { ...playerColors, [side]: color };
+  try {
+    window.localStorage.setItem("mtg-colors", JSON.stringify(playerColors));
+  } catch {
+    // The color still applies for this visit.
+  }
+  applyPlayerColors();
+  render();
+}
+
 function loadThemePreference() {
   const saved = window.localStorage.getItem("mtg-theme");
   isDarkMode = saved !== "light";
   document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
+  applyPlayerColors();
 }
 
 function toggleTheme() {
   isDarkMode = !isDarkMode;
   document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
   window.localStorage.setItem("mtg-theme", isDarkMode ? "dark" : "light");
+  applyPlayerColors();
   render();
 }
 
@@ -1158,7 +1214,23 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
   return cell;
 }
 
-// Menu button; holds theme, account and sign out. Sync problems show in the banner instead.
+// One row of color swatches per player; the other player's color can't be picked.
+function colorPickerMarkup(side) {
+  const other = side === "row" ? "column" : "row";
+  const mode = isDarkMode ? "dark" : "light";
+  const swatches = Object.entries(PLAYER_COLORS)
+    .map(([id, color]) => {
+      const selected = playerColors[side] === id;
+      const taken = playerColors[other] === id;
+      return `<button type="button" class="color-swatch ${selected ? "is-selected" : ""}" style="background:${color[mode][0]}"
+        data-player-color="${side}:${id}" aria-label="${PLAYER_NAMES[side]}: ${color.label}${taken ? ` (${PLAYER_NAMES[other]}'s color)` : ""}"
+        aria-pressed="${selected}" title="${color.label}" ${taken ? "disabled" : ""}></button>`;
+    })
+    .join("");
+  return `<div class="color-picker"><span class="color-picker-name">${PLAYER_NAMES[side]}</span><div class="color-swatches">${swatches}</div></div>`;
+}
+
+// Menu button; holds theme, colors, account and sign out. Sync problems show in the banner instead.
 function menuMarkup() {
   return `<div class="menu-anchor">
     <button class="tool-button icon-button ${accountOpen ? "active" : ""}" type="button" data-account-toggle
@@ -1171,6 +1243,10 @@ function menuMarkup() {
             <section class="controls-section">
               <p class="controls-title">Display</p>
               <button class="mode-toggle" type="button" data-theme-toggle>${isDarkMode ? "Switch to light mode" : "Switch to dark mode"}</button>
+            </section>
+            <section class="controls-section">
+              <p class="controls-title">Colors</p>
+              ${["row", "column"].map(colorPickerMarkup).join("")}
             </section>
             <section class="controls-section">
               <p class="controls-title">Account</p>
@@ -1734,6 +1810,10 @@ function bindSharedEvents() {
   });
 
   onClick("[data-sync-retry]", retrySyncNow);
+  onClick("[data-player-color]", (el) => {
+    const [side, color] = el.dataset.playerColor.split(":");
+    setPlayerColor(side, color);
+  });
 
   const passwordForm = app.querySelector("[data-password-form]");
   if (passwordForm) {
@@ -1926,10 +2006,12 @@ function renderGameScreen() {
   app.innerHTML = `
     <div class="game-screen">
       ${lifeHalfMarkup("column")}
+      <div class="game-seam">
+        <button type="button" class="game-menu-button" data-game-menu aria-label="Game menu" aria-expanded="${game.menuOpen}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+        </button>
+      </div>
       ${lifeHalfMarkup("row")}
-      <button type="button" class="game-menu-button" data-game-menu aria-label="Game menu" aria-expanded="${game.menuOpen}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
-      </button>
       ${gameMenuMarkup()}
       ${actionToast ? `<p class="toast game-toast" role="status">${escapeHtml(actionToast)}</p>` : ""}
     </div>
