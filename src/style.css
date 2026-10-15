@@ -2034,3 +2034,8 @@ select:focus-visible {
 .save-state.is-error {
   color: var(--alert-ink);
 }
+
+.save-state.is-local {
+  color: var(--muted);
+  font-weight: 600;
+}

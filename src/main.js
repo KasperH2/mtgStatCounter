@@ -149,6 +149,30 @@ function wait(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+// A phone that sleeps or drops into the background can leave a request hanging forever, which would
+// block every later save. Each Supabase request gets a time limit and then counts as failed, so the
+// normal retry takes over.
+const REQUEST_TIMEOUT_MS = 10000;
+
+function timed(query) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return Promise.resolve(query.abortSignal(controller.signal)).then(
+    (result) => {
+      window.clearTimeout(timer);
+      return result;
+    },
+    (error) => {
+      window.clearTimeout(timer);
+      return { data: null, error };
+    }
+  );
+}
+
+function sameInstant(a, b) {
+  return Boolean(a && b) && Date.parse(a) === Date.parse(b);
+}
+
 function clearSaveRetryTimer() {
   if (saveRetryTimer) {
     window.clearTimeout(saveRetryTimer);
@@ -227,6 +251,7 @@ function scheduleRemoteReload() {
 
     try {
       await loadRemoteState();
+      await loadRemoteTournament();
       render();
     } catch {
       // Ignore transient reload errors; next realtime event or save will resync.
@@ -249,6 +274,9 @@ function setupRealtimeSubscription() {
 
       applyRemoteCellState(row);
       render();
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "tournament_state" }, (payload) => {
+      if (payload.new) applyRemoteTournament(payload.new);
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "deck_layout" }, (payload) => {
       const row = payload.new || payload.old;
@@ -432,11 +460,8 @@ function matchupRows() {
 
 async function loadRemoteState() {
   const [{ data: deckData, error: deckError }, { data: cellData, error: cellError }] = await Promise.all([
-    supabase
-      .from("deck_layout")
-      .select("axis, position, deck_name, updated_at")
-      .order("position", { ascending: true }),
-    supabase.from("matchup_cells").select("row_deck, column_deck, score, games, updated_at")
+    timed(supabase.from("deck_layout").select("axis, position, deck_name, updated_at").order("position", { ascending: true })),
+    timed(supabase.from("matchup_cells").select("row_deck, column_deck, score, games, updated_at"))
   ]);
 
   if (deckError) throw deckError;
@@ -506,16 +531,20 @@ async function persistRemoteState(successStatus = "saved") {
   let saveError = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const { error: deckError } = await supabase.from("deck_layout").upsert(deckLayoutRows(), {
-      onConflict: "axis,position"
-    });
+    const { error: deckError } = await timed(
+      supabase.from("deck_layout").upsert(deckLayoutRows(), {
+        onConflict: "axis,position"
+      })
+    );
 
     if (deckError) {
       saveError = deckError;
     } else {
-      const { error: cellError } = await supabase.from("matchup_cells").upsert(matchupRows(), {
-        onConflict: "row_deck,column_deck"
-      });
+      const { error: cellError } = await timed(
+        supabase.from("matchup_cells").upsert(matchupRows(), {
+          onConflict: "row_deck,column_deck"
+        })
+      );
       saveError = cellError || null;
     }
 
@@ -593,12 +622,14 @@ function queueCellSyncOperation(rowDeck, columnDeck, scoreDelta, gamesDelta) {
 
 async function applyCellDeltaWithOptimisticLock(op) {
   for (let attempt = 1; attempt <= MAX_CELL_SYNC_RETRIES; attempt += 1) {
-    const { data: currentRows, error: readError } = await supabase
-      .from("matchup_cells")
-      .select("score, games, updated_at")
-      .eq("row_deck", op.rowDeck)
-      .eq("column_deck", op.columnDeck)
-      .limit(1);
+    const { data: currentRows, error: readError } = await timed(
+      supabase
+        .from("matchup_cells")
+        .select("row_deck, column_deck, score, games, updated_at")
+        .eq("row_deck", op.rowDeck)
+        .eq("column_deck", op.columnDeck)
+        .limit(1)
+    );
 
     if (readError) {
       await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
@@ -606,24 +637,35 @@ async function applyCellDeltaWithOptimisticLock(op) {
     }
 
     const current = (currentRows || [])[0] || null;
+
+    // If an earlier attempt's write landed but its answer was lost, the row carries the exact time we
+    // wrote. Treat that as done instead of adding the game a second time.
+    if (current && op.lastWriteAt && sameInstant(current.updated_at, op.lastWriteAt)) {
+      applyRemoteCellState(current);
+      return true;
+    }
+
     const nowIso = new Date().toISOString();
+    op.lastWriteAt = nowIso;
 
     if (!current) {
-      const { error: insertError, data: insertedRows } = await supabase
-        .from("matchup_cells")
-        .upsert(
-          {
-            row_deck: op.rowDeck,
-            column_deck: op.columnDeck,
-            score: op.scoreDelta,
-            games: Math.max(0, op.gamesDelta),
-            updated_by: currentUser.id,
-            updated_at: nowIso
-          },
-          { onConflict: "row_deck,column_deck" }
-        )
-        .select("row_deck, column_deck, score, games, updated_at")
-        .limit(1);
+      const { error: insertError, data: insertedRows } = await timed(
+        supabase
+          .from("matchup_cells")
+          .upsert(
+            {
+              row_deck: op.rowDeck,
+              column_deck: op.columnDeck,
+              score: op.scoreDelta,
+              games: Math.max(0, op.gamesDelta),
+              updated_by: currentUser.id,
+              updated_at: nowIso
+            },
+            { onConflict: "row_deck,column_deck" }
+          )
+          .select("row_deck, column_deck, score, games, updated_at")
+          .limit(1)
+      );
 
       if (insertError) {
         await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
@@ -643,19 +685,21 @@ async function applyCellDeltaWithOptimisticLock(op) {
     const nextScore = Math.trunc(Number(current.score || 0)) + op.scoreDelta;
     const nextGames = Math.max(0, Math.trunc(Number(current.games || 0)) + op.gamesDelta);
 
-    const { data: updatedRows, error: updateError } = await supabase
-      .from("matchup_cells")
-      .update({
-        score: nextScore,
-        games: nextGames,
-        updated_by: currentUser.id,
-        updated_at: nowIso
-      })
-      .eq("row_deck", op.rowDeck)
-      .eq("column_deck", op.columnDeck)
-      .eq("updated_at", current.updated_at)
-      .select("row_deck, column_deck, score, games, updated_at")
-      .limit(1);
+    const { data: updatedRows, error: updateError } = await timed(
+      supabase
+        .from("matchup_cells")
+        .update({
+          score: nextScore,
+          games: nextGames,
+          updated_by: currentUser.id,
+          updated_at: nowIso
+        })
+        .eq("row_deck", op.rowDeck)
+        .eq("column_deck", op.columnDeck)
+        .eq("updated_at", current.updated_at)
+        .select("row_deck, column_deck, score, games, updated_at")
+        .limit(1)
+    );
 
     if (updateError) {
       await wait(Math.min(1400, 180 * 2 ** (attempt - 1)));
@@ -1905,6 +1949,9 @@ let tournamentSetup = null;
 let tournament = loadTournament();
 let tournamentEndArmed = false;
 let tournamentPickScrollTop = 0;
+let tournamentRemote = "unknown";
+let tournamentSync = "idle";
+let tournamentPushTimer = null;
 
 function otherSide(side) {
   return side === "row" ? "column" : "row";
@@ -1919,13 +1966,102 @@ function loadTournament() {
   }
 }
 
-function saveTournament() {
+function writeLocalTournament() {
   try {
     if (tournament) window.localStorage.setItem("mtg-tournament", JSON.stringify(tournament));
     else window.localStorage.removeItem("mtg-tournament");
   } catch {
     // The tournament still runs for this visit.
   }
+}
+
+// Every change is kept on this device and shared through Supabase (one row, id 1), so the other
+// phone sees it and either phone can carry on later. Without the table it stays on this device.
+function saveTournament() {
+  if (tournament) tournament.updatedAt = new Date().toISOString();
+  writeLocalTournament();
+  pushTournament();
+}
+
+function isMissingTable(error) {
+  const text = `${error.code || ""} ${error.message || ""}`;
+  return /42P01|PGRST205|does not exist|Could not find the table/i.test(text);
+}
+
+async function pushTournament() {
+  if (!supabase || !currentUser || tournamentRemote === "unavailable") return;
+  if (tournamentPushTimer) {
+    window.clearTimeout(tournamentPushTimer);
+    tournamentPushTimer = null;
+  }
+
+  tournamentSync = "saving";
+  const { error } = await timed(
+    supabase.from("tournament_state").upsert(
+      {
+        id: 1,
+        data: tournament,
+        updated_by: currentUser.id,
+        updated_at: tournament ? tournament.updatedAt : new Date().toISOString()
+      },
+      { onConflict: "id" }
+    )
+  );
+
+  if (!error) {
+    tournamentRemote = "available";
+    tournamentSync = "saved";
+  } else if (isMissingTable(error)) {
+    tournamentRemote = "unavailable";
+    tournamentSync = "local";
+  } else {
+    tournamentSync = "error";
+    tournamentPushTimer = window.setTimeout(pushTournament, 4000);
+  }
+  render();
+}
+
+// Takes the shared tournament unless this device has a newer change that is still on its way up.
+function applyRemoteTournament(row) {
+  const remoteTime = Date.parse(row.updated_at || 0) || 0;
+  const localTime = tournament && tournament.updatedAt ? Date.parse(tournament.updatedAt) || 0 : 0;
+  if (tournament && localTime > remoteTime) return;
+
+  tournament = row.data || null;
+  if (!tournament) tournamentEndArmed = false;
+  writeLocalTournament();
+  render();
+}
+
+async function loadRemoteTournament() {
+  if (!supabase || !currentUser) return;
+  const { data, error } = await timed(supabase.from("tournament_state").select("data, updated_at").eq("id", 1).maybeSingle());
+
+  if (error) {
+    if (isMissingTable(error)) {
+      tournamentRemote = "unavailable";
+      tournamentSync = "local";
+    }
+    return;
+  }
+
+  tournamentRemote = "available";
+  if (!data) {
+    // First time sharing is available: share a tournament this device already had.
+    if (tournament) pushTournament();
+    else tournamentSync = "saved";
+    return;
+  }
+  tournamentSync = "saved";
+  applyRemoteTournament(data);
+}
+
+function tournamentSyncNote() {
+  if (tournamentRemote === "unavailable") return ["local", "Saved on this phone only. Sharing isn't set up in Supabase yet."];
+  if (tournamentSync === "error") return ["error", "Not shared yet. Retrying…"];
+  if (tournamentSync === "saving") return ["saving", "Sharing…"];
+  if (tournamentRemote === "available") return ["saved", "Shared with both phones"];
+  return ["saving", "Connecting…"];
 }
 
 function deckRate(side, name) {
@@ -2214,6 +2350,7 @@ function renderTournamentView() {
         <h2>Tournament</h2>
         ${menuMarkup()}
       </div>
+      <p class="save-state is-${tournamentSyncNote()[0]}">${tournamentSyncNote()[1]}</p>
       <p class="view-note">${modeLabel} · lowest ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE} · ${PLAYER_NAMES.row} ${tournamentRemaining("row").length} left · ${PLAYER_NAMES.column} ${
         tournamentRemaining("column").length
       } left</p>
@@ -2560,6 +2697,7 @@ async function handleSession(session) {
 
   try {
     await loadRemoteState();
+    await loadRemoteTournament();
     setupRealtimeSubscription();
   } catch (error) {
     authError = `Could not load data from Supabase: ${error.message}`;

@@ -157,3 +157,40 @@ end $$;
 npm install
 npm run dev
 ```
+
+9. Shared tournament (lets both phones see and continue the same tournament). In SQL Editor, run:
+
+```sql
+create table if not exists public.tournament_state (
+  id integer primary key default 1 check (id = 1),
+  data jsonb,
+  updated_by uuid references auth.users(id),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.tournament_state enable row level security;
+
+drop policy if exists "tournament_state_select" on public.tournament_state;
+drop policy if exists "tournament_state_insert" on public.tournament_state;
+drop policy if exists "tournament_state_update" on public.tournament_state;
+
+create policy "tournament_state_select"
+on public.tournament_state
+for select
+using (auth.role() = 'authenticated');
+
+create policy "tournament_state_insert"
+on public.tournament_state
+for insert
+with check (auth.role() = 'authenticated');
+
+create policy "tournament_state_update"
+on public.tournament_state
+for update
+using (auth.role() = 'authenticated')
+with check (auth.role() = 'authenticated');
+
+alter publication supabase_realtime add table public.tournament_state;
+```
+
+Without this table the app still runs tournaments, but each one is saved only on the phone that started it.
