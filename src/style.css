@@ -64,7 +64,7 @@
   --kasper-soft: #24456e;
   --kasper-ink: #86b6ef;
   --daniel: #d95926;
-  --daniel-soft: #6b3a24;
+  --daniel-soft: #a24a1f;
   --daniel-ink: #f39a72;
   --few-highlight: #4d3f99;
   --mid: #383b40;
@@ -1830,4 +1830,207 @@ select:focus-visible {
 .color-swatch:disabled {
   opacity: 0.25;
   cursor: not-allowed;
+}
+
+/* Tournament: setup checklist */
+.pick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.pick-head .section-label {
+  margin: 0;
+}
+
+.pick-shortcuts {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.pick-shortcuts .link-button {
+  min-height: 36px;
+  padding: 0 0.5rem;
+}
+
+.pick-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 48px;
+}
+
+.pick-row input {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  accent-color: var(--kasper);
+}
+
+.pick-row.is-picked .list-name {
+  color: var(--ink);
+}
+
+.pick-row:not(.is-picked) .list-name {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* Setup fills the view: the lists scroll in their own area, the start/cancel bar stays below them */
+.app-view.is-fixed {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 0.6rem;
+}
+
+.tournament-setup {
+  flex: 1;
+  min-height: 0;
+}
+
+.pick-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-bottom: 0.5rem;
+}
+
+/* Keep the lists at full height so the area scrolls instead of squeezing them */
+.pick-scroll > * {
+  flex-shrink: 0;
+}
+
+.tournament-footer {
+  flex: none;
+  display: grid;
+  gap: 0.5rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+
+.tournament-footer .view-note {
+  text-align: center;
+}
+
+.is-warning-note {
+  color: var(--daniel-ink);
+  font-weight: 600;
+}
+
+.start-game-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Tournament: running */
+.next-matchup {
+  display: grid;
+  justify-items: center;
+  gap: 0.15rem;
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.next-matchup .vs-mark {
+  margin: 0;
+}
+
+.tournament-deck {
+  grid-template-columns: minmax(0, 1fr) auto;
+  cursor: default;
+}
+
+.tournament-deck .list-name {
+  font-size: 0.92rem;
+}
+
+.tournament-deck.is-out .list-name {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.tournament-deck.is-waiting .list-name {
+  color: var(--muted);
+}
+
+.verdict-chip.is-draw {
+  color: var(--good-ink);
+  border-color: currentColor;
+}
+
+.verdict-chip.is-playing {
+  color: var(--on-strong);
+  background: var(--start-bg);
+  border-color: var(--start-bg);
+}
+
+.verdict-chip.is-waiting,
+.verdict-chip.is-out {
+  border-style: dashed;
+}
+
+.champion-card {
+  display: grid;
+  justify-items: center;
+  gap: 0.3rem;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.champion-card.is-row {
+  background: var(--kasper-soft);
+}
+
+.champion-card.is-column {
+  background: var(--daniel-soft);
+}
+
+.champion-name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.champion-card .view-note {
+  color: var(--ink);
+}
+
+.ghost-button.is-danger {
+  color: var(--alert-ink);
+  background: var(--alert-bg);
+  border-color: var(--alert-border);
+}
+
+.game-menu-note.is-champion {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+}
+
+/* Save confirmation for a game logged from the life counter */
+.save-state {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.save-state.is-saving {
+  color: var(--muted);
+}
+
+.save-state.is-saved {
+  color: var(--good-ink);
+}
+
+.save-state.is-error {
+  color: var(--alert-ink);
 }

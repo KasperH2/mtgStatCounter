@@ -317,13 +317,13 @@ function setActiveTab(tabId) {
 // cells with a big lead, soft fills smaller leads and the life counter, ink is for text.
 const PLAYER_COLORS = {
   blue: { label: "Blue", light: ["#2a78d6", "#9ec5f4", "#1c5cab"], dark: ["#3987e5", "#24456e", "#86b6ef"] },
-  orange: { label: "Orange", light: ["#eb6834", "#f6b99a", "#b4441a"], dark: ["#d95926", "#6b3a24", "#f39a72"] },
-  green: { label: "Dark green", light: ["#1f7a45", "#a8dcb9", "#145c33"], dark: ["#2b8f53", "#1c4630", "#7fd3a0"] },
-  purple: { label: "Purple", light: ["#7b4fd6", "#cdb8f5", "#5a35a8"], dark: ["#8c66e8", "#3a2d66", "#bba6f5"] },
-  red: { label: "Red", light: ["#d23b3b", "#f3b0b0", "#a12424"], dark: ["#d94848", "#5e2424", "#f29a9a"] },
-  teal: { label: "Teal", light: ["#128585", "#9fdcdc", "#0c6363"], dark: ["#1ea3a3", "#18484a", "#7fd6d6"] },
-  pink: { label: "Pink", light: ["#d6458f", "#f4b5d4", "#a52a6a"], dark: ["#e0559c", "#5c2443", "#f2a3c8"] },
-  gold: { label: "Gold", light: ["#c48200", "#f2d58f", "#7f5500"], dark: ["#d99a00", "#5a4512", "#f0c766"] }
+  orange: { label: "Orange", light: ["#eb6834", "#f6b99a", "#b4441a"], dark: ["#d95926", "#a24a1f", "#f39a72"] },
+  green: { label: "Dark green", light: ["#1f7a45", "#a8dcb9", "#145c33"], dark: ["#2b8f53", "#1f6e44", "#7fd3a0"] },
+  purple: { label: "Purple", light: ["#7b4fd6", "#cdb8f5", "#5a35a8"], dark: ["#8c66e8", "#5a40a6", "#bba6f5"] },
+  red: { label: "Red", light: ["#d23b3b", "#f3b0b0", "#a12424"], dark: ["#d94848", "#8f2b2b", "#f29a9a"] },
+  teal: { label: "Teal", light: ["#128585", "#9fdcdc", "#0c6363"], dark: ["#1ea3a3", "#14706f", "#7fd6d6"] },
+  pink: { label: "Pink", light: ["#d6458f", "#f4b5d4", "#a52a6a"], dark: ["#e0559c", "#8f2d62", "#f2a3c8"] },
+  gold: { label: "Gold", light: ["#c48200", "#f2d58f", "#7f5500"], dark: ["#d99a00", "#80600f", "#f0c766"] }
 };
 const PLAYER_TOKEN = { row: "kasper", column: "daniel" };
 const DEFAULT_PLAYER_COLORS = { row: "blue", column: "orange" };
@@ -1347,6 +1347,9 @@ function captureScrollPositions() {
 
   const view = app.querySelector("[data-view]");
   if (view) viewScrollTop[view.dataset.view] = view.scrollTop;
+
+  const pickScroll = app.querySelector("[data-pick-scroll]");
+  if (pickScroll) tournamentPickScrollTop = pickScroll.scrollTop;
 }
 
 function restoreGridScrollPosition() {
@@ -1438,6 +1441,9 @@ function segmentedMarkup(options, current, attribute) {
 }
 
 function renderLogView() {
+  if (tournament) return renderTournamentView();
+  if (tournamentSetup) return renderTournamentSetup();
+
   const { rowIndex, colIndex } = getLogIndexes();
   const cellData = state.matrix[rowIndex][colIndex];
   const record = getRecord(cellData);
@@ -1486,6 +1492,7 @@ function renderLogView() {
         <button type="button" class="ghost-button" data-undo ${sessionLog.length ? "" : "disabled"}>Undo last game</button>
         <button type="button" class="ghost-button" data-suggest>Suggest a matchup</button>
       </div>
+      <button type="button" class="ghost-button" data-tournament-open>Tournament mode</button>
 
       <p class="section-label">This session</p>
       <div class="card list">
@@ -1828,7 +1835,8 @@ function bindSharedEvents() {
     });
   }
 
-  onClick("[data-start-game]", startGame);
+  onClick("[data-start-game]", () => startGame());
+  bindTournamentEvents();
   onClick("[data-undo]", undoLastResult);
   onClick("[data-suggest]", suggestLeastPlayedPair);
 
@@ -1881,6 +1889,377 @@ function bindSharedEvents() {
   }
 }
 
+// ---------- Tournament ----------
+// Each player ticks the same number of decks. Decks are ranked once, lowest win rate first, and every
+// game draws one deck per player at random from their 5 lowest-ranked decks still in. The losing (or,
+// in "winner is out" mode, the winning) deck leaves; the first player with no decks left ends it.
+
+const TOURNAMENT_DRAW_SIZES = [1, 2, 3, 4, 5];
+const DEFAULT_TOURNAMENT_DRAW_SIZE = 5;
+const TOURNAMENT_MODES = [
+  ["loser", "Loser is out"],
+  ["winner", "Winner is out"]
+];
+
+let tournamentSetup = null;
+let tournament = loadTournament();
+let tournamentEndArmed = false;
+let tournamentPickScrollTop = 0;
+
+function otherSide(side) {
+  return side === "row" ? "column" : "row";
+}
+
+function loadTournament() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("mtg-tournament") || "null");
+    return saved && saved.order && saved.out ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveTournament() {
+  try {
+    if (tournament) window.localStorage.setItem("mtg-tournament", JSON.stringify(tournament));
+    else window.localStorage.removeItem("mtg-tournament");
+  } catch {
+    // The tournament still runs for this visit.
+  }
+}
+
+function deckRate(side, name) {
+  const decks = side === "row" ? state.rowDecks : state.columnDecks;
+  const index = decks.indexOf(name);
+  return index === -1 ? null : getDeckSummary(side, index);
+}
+
+function byName(a, b) {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
+function openTournamentSetup() {
+  tournamentPickScrollTop = 0;
+  tournamentSetup = { mode: "loser", drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE, picks: { row: [], column: [] } };
+  renderAtTop();
+}
+
+function toggleTournamentPick(side, name) {
+  const picks = tournamentSetup.picks[side];
+  tournamentSetup.picks[side] = picks.includes(name) ? picks.filter((pick) => pick !== name) : [...picks, name];
+  render();
+}
+
+function setAllTournamentPicks(side, all) {
+  tournamentSetup.picks[side] = all ? [...(side === "row" ? state.rowDecks : state.columnDecks)] : [];
+  render();
+}
+
+function tournamentRemaining(side) {
+  return tournament.order[side].filter((name) => !tournament.out[side].includes(name));
+}
+
+function tournamentDrawPool(side) {
+  return tournamentRemaining(side).slice(0, tournament.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE);
+}
+
+function drawTournamentMatchup() {
+  const pick = (side) => {
+    const pool = tournamentDrawPool(side);
+    return pool[Math.floor(Math.random() * pool.length)];
+  };
+  tournament.current = { rowDeck: pick("row"), columnDeck: pick("column") };
+}
+
+function startTournament() {
+  const { picks, mode, drawSize } = tournamentSetup;
+  if (!picks.row.length || picks.row.length !== picks.column.length) return;
+
+  // Win rates are read once, here; the order and the rates shown stay fixed for the whole tournament.
+  // Lowest win rate first; decks with no games count as lowest.
+  const startRates = { row: {}, column: {} };
+  ["row", "column"].forEach((side) => {
+    picks[side].forEach((name) => {
+      startRates[side][name] = deckRate(side, name)?.rate ?? null;
+    });
+  });
+  const rank = (side) =>
+    [...picks[side]].sort((a, b) => (startRates[side][a] ?? -1) - (startRates[side][b] ?? -1) || byName(a, b));
+
+  tournament = {
+    mode,
+    startRates,
+    drawSize,
+    order: { row: rank("row"), column: rank("column") },
+    out: { row: [], column: [] },
+    current: null,
+    history: [],
+    champion: null
+  };
+  drawTournamentMatchup();
+  tournamentSetup = null;
+  tournamentEndArmed = false;
+  saveTournament();
+  renderAtTop();
+}
+
+// Called when a tournament game's winner is logged.
+function advanceTournament(winner) {
+  if (!tournament || !tournament.current) return;
+  const { rowDeck, columnDeck } = tournament.current;
+  const outSide = tournament.mode === "loser" ? otherSide(winner) : winner;
+  const outDeck = outSide === "row" ? rowDeck : columnDeck;
+
+  tournament.out[outSide].push(outDeck);
+  tournament.history.unshift({ rowDeck, columnDeck, winner, outSide, outDeck });
+
+  if (!tournamentRemaining(outSide).length) {
+    // Loser is out: the player who still has decks wins. Winner is out: the player whose decks all won.
+    tournament.champion = tournament.mode === "loser" ? otherSide(outSide) : outSide;
+    tournament.current = null;
+  } else {
+    drawTournamentMatchup();
+  }
+  saveTournament();
+}
+
+function undoTournamentGame() {
+  tournamentEndArmed = false;
+  const last = tournament && tournament.history[0];
+  if (!last) return;
+
+  tournament.history.shift();
+  tournament.out[last.outSide] = tournament.out[last.outSide].filter((name) => name !== last.outDeck);
+  tournament.champion = null;
+  tournament.current = { rowDeck: last.rowDeck, columnDeck: last.columnDeck };
+  saveTournament();
+
+  // Also take the result back out of the stats, if it is still the most recent game logged here.
+  const logged = sessionLog[0];
+  if (logged && logged.rowDeck === last.rowDeck && logged.columnDeck === last.columnDeck && logged.winner === last.winner) {
+    undoLastResult();
+    return;
+  }
+  showToast("Tournament step undone. The result stays in the stats.");
+  render();
+}
+
+function redrawTournamentMatchup() {
+  tournamentEndArmed = false;
+  drawTournamentMatchup();
+  saveTournament();
+  render();
+}
+
+function endTournament() {
+  if (!tournamentEndArmed) {
+    tournamentEndArmed = true;
+    render();
+    return;
+  }
+  tournament = null;
+  tournamentEndArmed = false;
+  saveTournament();
+  renderAtTop();
+}
+
+function startTournamentGame() {
+  tournamentEndArmed = false;
+  if (!tournament || !tournament.current) return;
+  startGame(tournament.current.rowDeck, tournament.current.columnDeck, true);
+}
+
+function tournamentModeNote(mode) {
+  return mode === "loser"
+    ? "The losing deck leaves. A player wins when the other has no decks left."
+    : "The winning deck leaves. A player wins when all their decks have won.";
+}
+
+function renderTournamentSetup() {
+  const { picks, mode } = tournamentSetup;
+  const rowCount = picks.row.length;
+  const columnCount = picks.column.length;
+  const ready = rowCount > 0 && rowCount === columnCount;
+
+  const checklist = (side) => {
+    const decks = [...(side === "row" ? state.rowDecks : state.columnDecks)].sort(byName);
+    return `<div class="card list">${decks
+      .map((name) => {
+        const summary = deckRate(side, name);
+        const checked = picks[side].includes(name);
+        return `<label class="list-row pick-row ${checked ? "is-picked" : ""}">
+          <input type="checkbox" data-tournament-pick="${side}" value="${escapeHtml(name)}" ${checked ? "checked" : ""} />
+          <span class="list-name">${escapeHtml(name)}</span>
+          <span class="list-sub">${summary ? formatRate(summary.rate) : "–"}</span>
+        </label>`;
+      })
+      .join("")}</div>`;
+  };
+
+  const playerBlock = (side) => `
+    <div class="pick-head">
+      <p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}'s decks · ${picks[side].length} picked</p>
+      <div class="pick-shortcuts">
+        <button type="button" class="link-button" data-tournament-all="${side}">All</button>
+        <button type="button" class="link-button" data-tournament-none="${side}">None</button>
+      </div>
+    </div>
+    ${checklist(side)}`;
+
+  const status = ready
+    ? `${rowCount} decks each. Ready to start.`
+    : rowCount === 0 && columnCount === 0
+      ? "Tick the decks each of you wants to bring."
+      : `Pick the same number of decks: ${PLAYER_NAMES.row} ${rowCount}, ${PLAYER_NAMES.column} ${columnCount}.`;
+
+  return `
+    <section class="view-stack tournament-setup">
+      <div class="view-head">
+        <h2>Tournament</h2>
+        ${menuMarkup()}
+      </div>
+      <div class="pick-scroll" data-pick-scroll>
+        ${segmentedMarkup(TOURNAMENT_MODES, mode, "data-tournament-mode")}
+        <p class="view-note">${tournamentModeNote(mode)}</p>
+        <p class="section-label">Draw from the lowest</p>
+        ${segmentedMarkup(
+          TOURNAMENT_DRAW_SIZES.map((size) => [String(size), String(size)]),
+          String(tournamentSetup.drawSize),
+          "data-tournament-draw"
+        )}
+        <p class="view-note">${
+          tournamentSetup.drawSize === 1
+            ? "Each game uses each player's lowest-ranked deck still in."
+            : `Each game draws at random from each player's ${tournamentSetup.drawSize} lowest-ranked decks still in.`
+        }</p>
+        ${playerBlock("row")}
+        ${playerBlock("column")}
+      </div>
+      <div class="tournament-footer">
+        <p class="view-note ${ready ? "" : "is-warning-note"}">${status}</p>
+        <button type="button" class="start-game-button" data-tournament-start ${ready ? "" : "disabled"}>Start tournament</button>
+        <button type="button" class="ghost-button" data-tournament-cancel>Cancel</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderTournamentView() {
+  const t = tournament;
+  const modeLabel = TOURNAMENT_MODES.find(([id]) => id === t.mode)[1];
+
+  const deckList = (side) => {
+    const pool = tournamentDrawPool(side);
+    const playing = t.current && (side === "row" ? t.current.rowDeck : t.current.columnDeck);
+    return `<div class="card list">${t.order[side]
+      .map((name, rank) => {
+        const out = t.out[side].includes(name);
+        const status = out
+          ? ["out", "Out"]
+          : name === playing
+            ? ["playing", "Playing"]
+            : pool.includes(name)
+              ? ["draw", "In the draw"]
+              : ["waiting", "Waiting"];
+        const startRate = t.startRates ? t.startRates[side][name] : null;
+        return `<div class="list-row tournament-deck is-${status[0]}">
+          <span class="list-main"><span class="list-name">${rank + 1}. ${escapeHtml(name)}</span>
+            <span class="list-sub">${formatRate(startRate ?? null)} at start</span></span>
+          <span class="verdict-chip is-${status[0]}">${status[1]}</span>
+        </div>`;
+      })
+      .join("")}</div>`;
+  };
+
+  let main;
+  if (t.champion) {
+    main = `<article class="card champion-card is-${t.champion}">
+      <p class="section-label">Tournament winner</p>
+      <p class="champion-name">${playerDot(t.champion)}${PLAYER_NAMES[t.champion]}</p>
+      <p class="view-note">${t.history.length} games played · ${modeLabel.toLowerCase()}</p>
+    </article>`;
+  } else {
+    const { rowDeck, columnDeck } = t.current;
+    const indexes = getCellIndexesByDeckNames(rowDeck, columnDeck);
+    const record = indexes ? getRecord(state.matrix[indexes.rowIndex][indexes.colIndex]) : null;
+    main = `<article class="card h2h-card">
+      <p class="section-label">Next game</p>
+      <div class="next-matchup">
+        <span class="ink-row">${playerDot("row")}${escapeHtml(rowDeck)}</span>
+        <span class="vs-mark">vs</span>
+        <span class="ink-column">${playerDot("column")}${escapeHtml(columnDeck)}</span>
+      </div>
+      ${record ? `${splitBarMarkup(record.rowWins, record.columnWins)}<p class="h2h-note">${record.rowWins}–${record.columnWins} so far</p>` : ""}
+    </article>
+    <button type="button" class="start-game-button" data-tournament-play>Start game</button>
+    <button type="button" class="ghost-button" data-tournament-redraw>Draw another matchup</button>`;
+  }
+
+  const history = t.history.length
+    ? `<p class="section-label">Games</p>
+      <div class="card list">${t.history
+        .map((game) => {
+          const winnerDeck = game.winner === "row" ? game.rowDeck : game.columnDeck;
+          const loserDeck = game.winner === "row" ? game.columnDeck : game.rowDeck;
+          return `<div class="log-item">${playerDot(game.winner)}<span>${escapeHtml(winnerDeck)} beat ${escapeHtml(loserDeck)} · ${escapeHtml(
+            game.outDeck
+          )} out</span></div>`;
+        })
+        .join("")}</div>`
+    : "";
+
+  return `
+    <section class="view-stack">
+      <div class="view-head">
+        <h2>Tournament</h2>
+        ${menuMarkup()}
+      </div>
+      <p class="view-note">${modeLabel} · lowest ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE} · ${PLAYER_NAMES.row} ${tournamentRemaining("row").length} left · ${PLAYER_NAMES.column} ${
+        tournamentRemaining("column").length
+      } left</p>
+      ${main}
+      <p class="section-label">${playerDot("row")}${PLAYER_NAMES.row}'s decks, lowest win rate first</p>
+      ${deckList("row")}
+      <p class="section-label">${playerDot("column")}${PLAYER_NAMES.column}'s decks, lowest win rate first</p>
+      ${deckList("column")}
+      ${history}
+      <div class="two-buttons">
+        <button type="button" class="ghost-button" data-tournament-undo ${t.history.length ? "" : "disabled"}>Undo last game</button>
+        <button type="button" class="ghost-button ${tournamentEndArmed ? "is-danger" : ""}" data-tournament-end>${
+          tournamentEndArmed ? "Tap again to end" : t.champion ? "Finish tournament" : "End tournament"
+        }</button>
+      </div>
+    </section>
+  `;
+}
+
+function bindTournamentEvents() {
+  onClick("[data-tournament-open]", openTournamentSetup);
+  onClick("[data-tournament-draw]", (el) => {
+    tournamentSetup.drawSize = Number(el.dataset.tournamentDraw);
+    render();
+  });
+  onClick("[data-tournament-mode]", (el) => {
+    tournamentSetup.mode = el.dataset.tournamentMode;
+    render();
+  });
+  onClick("[data-tournament-all]", (el) => setAllTournamentPicks(el.dataset.tournamentAll, true));
+  onClick("[data-tournament-none]", (el) => setAllTournamentPicks(el.dataset.tournamentNone, false));
+  onClick("[data-tournament-start]", startTournament);
+  onClick("[data-tournament-cancel]", () => {
+    tournamentSetup = null;
+    renderAtTop();
+  });
+  onClick("[data-tournament-play]", startTournamentGame);
+  onClick("[data-tournament-redraw]", redrawTournamentMatchup);
+  onClick("[data-tournament-undo]", undoTournamentGame);
+  onClick("[data-tournament-end]", endTournament);
+
+  app.querySelectorAll("[data-tournament-pick]").forEach((input) => {
+    input.addEventListener("change", () => toggleTournamentPick(input.dataset.tournamentPick, input.value));
+  });
+}
+
 // ---------- Life counter ----------
 
 async function keepScreenOn() {
@@ -1897,10 +2276,11 @@ function releaseScreen() {
   wakeLock = null;
 }
 
-function newGameState(rowDeck, columnDeck) {
+function newGameState(rowDeck, columnDeck, inTournament = false) {
   return {
     rowDeck,
     columnDeck,
+    inTournament,
     life: { row: 20, column: 20 },
     delta: { row: 0, column: 0 },
     menuOpen: false,
@@ -1908,9 +2288,13 @@ function newGameState(rowDeck, columnDeck) {
   };
 }
 
-function startGame() {
-  const { rowIndex, colIndex } = getLogIndexes();
-  game = newGameState(state.rowDecks[rowIndex], state.columnDecks[colIndex]);
+function startGame(rowDeck, columnDeck, inTournament = false) {
+  if (!rowDeck || !columnDeck) {
+    const { rowIndex, colIndex } = getLogIndexes();
+    rowDeck = state.rowDecks[rowIndex];
+    columnDeck = state.columnDecks[colIndex];
+  }
+  game = newGameState(rowDeck, columnDeck, inTournament);
   accountOpen = false;
   render();
 
@@ -1921,12 +2305,12 @@ function startGame() {
 }
 
 function restartGame() {
-  game = newGameState(game.rowDeck, game.columnDeck);
+  game = newGameState(game.rowDeck, game.columnDeck, game.inTournament);
   render();
 }
 
 function closeGame() {
-  logPick = { rowDeck: game.rowDeck, columnDeck: game.columnDeck };
+  if (!game.inTournament) logPick = { rowDeck: game.rowDeck, columnDeck: game.columnDeck };
   game = null;
   releaseScreen();
   if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
@@ -1957,6 +2341,7 @@ function logGameWinner(winner) {
   }
 
   game.logged = winner;
+  if (game.inTournament) advanceTournament(winner);
   recordResult(indexes.rowIndex, indexes.colIndex, winner);
 }
 
@@ -1977,12 +2362,26 @@ function lifeHalfMarkup(side) {
   </section>`;
 }
 
+// Whether the game just logged from the life counter has been stored in Supabase yet.
+function loggedSaveState() {
+  if (hasPendingCellOp(game.rowDeck, game.columnDeck)) {
+    if (!navigator.onLine) return { kind: "error", label: "Not saved yet: you're offline. It's sent when you're back online." };
+    if (saveStatus === "error") return { kind: "error", label: "Not saved yet. Retrying…" };
+    return { kind: "saving", label: "Saving…" };
+  }
+  return { kind: "saved", label: "Saved" };
+}
+
 function gameMenuMarkup() {
   if (!game.menuOpen) return "";
 
   const deckOf = (side) => escapeHtml(side === "row" ? game.rowDeck : game.columnDeck);
+  const champion = game.inTournament && tournament && tournament.champion;
   const result = game.logged
-    ? `<p class="game-menu-note">${playerDot(game.logged)}Logged: ${PLAYER_NAMES[game.logged]}'s ${deckOf(game.logged)} won</p>`
+    ? `<p class="game-menu-note">${playerDot(game.logged)}Logged: ${PLAYER_NAMES[game.logged]}'s ${deckOf(game.logged)} won</p>
+      <p class="save-state is-${loggedSaveState().kind}" role="status">${loggedSaveState().label}</p>${
+        champion ? `<p class="game-menu-note is-champion">${playerDot(champion)}${PLAYER_NAMES[champion]} wins the tournament</p>` : ""
+      }`
     : `<p class="section-label">Who won?</p>
       <div class="win-buttons">
         <button type="button" class="win-button is-row" data-game-win="row">${deckOf("row")}<small>${PLAYER_NAMES.row}</small></button>
@@ -1993,10 +2392,13 @@ function gameMenuMarkup() {
     <div class="game-menu" role="dialog" aria-label="Game menu">
       ${syncBannerMarkup()}
       <div class="game-menu-result">${result}</div>
-      <div class="game-menu-actions">
-        <button type="button" class="ghost-button is-wide" data-game-resume>Back to game</button>
+      <div class="game-menu-actions">${
+        game.inTournament && game.logged
+          ? `<button type="button" class="ghost-button is-wide" data-game-close>${champion ? "See the tournament" : "Next matchup"}</button>`
+          : `<button type="button" class="ghost-button is-wide" data-game-resume>Back to game</button>
         <button type="button" class="ghost-button" data-game-restart>${game.logged ? "Rematch" : "Restart game"}</button>
-        <button type="button" class="ghost-button" data-game-close>Close game</button>
+        <button type="button" class="ghost-button" data-game-close>${game.inTournament ? "Back to tournament" : "Close game"}</button>`
+      }
       </div>
     </div>
   </div>`;
@@ -2013,7 +2415,7 @@ function renderGameScreen() {
       </div>
       ${lifeHalfMarkup("row")}
       ${gameMenuMarkup()}
-      ${actionToast ? `<p class="toast game-toast" role="status">${escapeHtml(actionToast)}</p>` : ""}
+      ${actionToast && !game.menuOpen ? `<p class="toast game-toast" role="status">${escapeHtml(actionToast)}</p>` : ""}
     </div>
   `;
 
@@ -2056,7 +2458,9 @@ function renderAppScreen() {
   app.innerHTML = `
     <div class="app-shell ${activeTab === "grid" && gridExpanded ? "is-expanded" : ""}">
       <header class="app-header">${syncBannerMarkup()}</header>
-      <main class="app-view ${activeTab === "grid" ? "is-grid" : ""}" data-view="${activeTab}">
+      <main class="app-view ${activeTab === "grid" ? "is-grid" : ""} ${
+        activeTab === "log" && tournamentSetup && !tournament ? "is-fixed" : ""
+      }" data-view="${activeTab}">
         ${views[activeTab]()}
       </main>
       ${actionToast ? `<p class="toast" role="status">${escapeHtml(actionToast)}</p>` : ""}
@@ -2073,6 +2477,8 @@ function renderAppScreen() {
 
   const view = app.querySelector("[data-view]");
   if (view) view.scrollTop = viewScrollTop[activeTab] || 0;
+  const pickScroll = app.querySelector("[data-pick-scroll]");
+  if (pickScroll) pickScroll.scrollTop = tournamentPickScrollTop;
 
   if (activeTab === "grid") bindGridView();
   bindSharedEvents();
@@ -2122,6 +2528,7 @@ async function handleSession(session) {
     pendingCellOps = [];
     sessionLog = [];
     game = null;
+    tournamentSetup = null;
     releaseScreen();
     if (saveTimer) {
       window.clearTimeout(saveTimer);
