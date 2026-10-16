@@ -2173,3 +2173,18 @@ select:focus-visible {
   font-weight: 600;
   color: var(--muted);
 }
+
+/* Tournament choosing: random pick, secret choices, waiting for the last winner */
+.choose-button.is-random {
+  border-style: dashed;
+  background: transparent;
+}
+
+.next-deck.is-secret {
+  font-size: 1.25rem;
+  color: var(--good-ink);
+}
+
+.next-note.is-waiting {
+  color: var(--muted);
+}

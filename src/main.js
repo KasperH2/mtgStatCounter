@@ -2005,6 +2005,10 @@ const TOURNAMENT_AFTER = [
   ["both", "Both get new decks"],
   ["stays", "Winner keeps their deck"]
 ];
+const TOURNAMENT_REVEAL = [
+  ["open", "Show choices right away"],
+  ["hidden", "Hide until both have chosen"]
+];
 const TOURNAMENT_PICKS = [
   ["random", "Random"],
   ["choose", "Choose yourselves"]
@@ -2144,6 +2148,7 @@ function openTournamentSetup() {
   tournamentSetup = {
     mode: "loser",
     after: "both",
+    reveal: "open",
     pick: "random",
     drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE,
     picks: { row: [], column: [] }
@@ -2205,7 +2210,7 @@ function fillTournamentMatchup(keepSide) {
 }
 
 function startTournament() {
-  const { picks, mode, after, pick } = tournamentSetup;
+  const { picks, mode, after, pick, reveal } = tournamentSetup;
   if (!picks.row.length || picks.row.length !== picks.column.length) return;
 
   // Win rates are read once, here; the order and the rates shown stay fixed for the whole tournament.
@@ -2223,6 +2228,7 @@ function startTournament() {
     mode,
     pick,
     winnerStays: mode === "loser" && after === "stays",
+    hideChoices: pick === "choose" && reveal === "hidden",
     startRates,
     drawSize: setupDrawSize(),
     order: { row: rank("row"), column: rank("column") },
@@ -2296,9 +2302,36 @@ function redrawTournamentMatchup() {
   render();
 }
 
+// From the second game on, the winner of the last game chooses first (when both players choose).
+function tournamentFirstChooser() {
+  const t = tournament;
+  if (!tournamentChooses() || t.kept || !t.current || !t.history.length) return null;
+  const winner = t.history[0].winner;
+  return t.current[deckKey(winner)] ? null : winner;
+}
+
+function canChooseTournamentDeck(side) {
+  const t = tournament;
+  if (!t.current || t.kept === side || t.current[deckKey(side)]) return false;
+  const first = tournamentFirstChooser();
+  return !first || first === side;
+}
+
+// While choices are hidden, a chosen deck stays secret until the other player has chosen too.
+function tournamentChoiceHidden(side) {
+  const t = tournament;
+  if (!t.hideChoices || !t.current || t.kept === side) return false;
+  return Boolean(t.current[deckKey(side)]) && !t.current[deckKey(otherSide(side))];
+}
+
+function chooseRandomTournamentDeck(side) {
+  const pool = tournamentDrawPool(side);
+  chooseTournamentDeck(side, pool[Math.floor(Math.random() * pool.length)]);
+}
+
 function chooseTournamentDeck(side, name) {
   tournamentEndArmed = false;
-  if (!tournament.current || tournament.kept === side || !tournamentDrawPool(side).includes(name)) return;
+  if (!canChooseTournamentDeck(side) || !tournamentDrawPool(side).includes(name)) return;
   tournament.current[deckKey(side)] = name;
   saveTournament();
   render();
@@ -2407,6 +2440,16 @@ function renderTournamentSetup() {
         }
         <p class="section-label">How decks are picked</p>
         ${segmentedMarkup(TOURNAMENT_PICKS, pick, "data-tournament-pick-mode")}
+        ${
+          pick === "choose"
+            ? `${segmentedMarkup(TOURNAMENT_REVEAL, tournamentSetup.reveal, "data-tournament-reveal")}
+              <p class="view-note">${
+                tournamentSetup.reveal === "hidden"
+                  ? "Your choice stays secret until the other player has chosen too. From the second game on, the last winner chooses first."
+                  : "You see each other's choice right away. From the second game on, the last winner chooses first."
+              }</p>`
+            : ""
+        }
         <div class="card stepper-card">
           <span class="stepper-label">From the lowest</span>
           <div class="draw-stepper">
@@ -2434,9 +2477,21 @@ function renderTournamentView() {
   const chooses = tournamentChooses();
   const startRateOf = (side, name) => (t.startRates ? t.startRates[side][name] ?? null : null);
 
+  // Each deck's wins and losses within this tournament, from its own game history.
+  const tournamentRecord = (side, name) => {
+    let wins = 0;
+    let losses = 0;
+    t.history.forEach((game) => {
+      if (game[deckKey(side)] !== name) return;
+      if (game.winner === side) wins += 1;
+      else losses += 1;
+    });
+    return { wins, losses };
+  };
+
   const deckList = (side) => {
     const pool = tournamentDrawPool(side);
-    const playing = t.current && t.current[deckKey(side)];
+    const playing = t.current && !tournamentChoiceHidden(side) ? t.current[deckKey(side)] : null;
     return `<div class="card list">${t.order[side]
       .map((name, rank) => {
         const out = t.out[side].includes(name);
@@ -2449,9 +2504,10 @@ function renderTournamentView() {
             : pool.includes(name)
               ? ["draw", chooses ? "Can be chosen" : "In the draw"]
               : ["waiting", "Waiting"];
+        const here = tournamentRecord(side, name);
         return `<div class="list-row tournament-deck is-${status[0]}">
           <span class="list-main"><span class="list-name">${rank + 1}. ${escapeHtml(name)}</span>
-            <span class="list-sub">${formatRate(startRateOf(side, name))} at start</span></span>
+            <span class="list-sub">${here.wins}–${here.losses} here · ${formatRate(startRateOf(side, name))} at start</span></span>
           <span class="verdict-chip is-${status[0]}">${status[1]}</span>
         </div>`;
       })
@@ -2461,6 +2517,19 @@ function renderTournamentView() {
   // One player's part of the next game: their deck, or the decks they can choose from.
   const sideBlock = (side) => {
     const deck = t.current[deckKey(side)];
+    if (deck && tournamentChoiceHidden(side)) {
+      return `<div class="next-side">
+        <span class="next-deck is-secret">${playerDot(side)}${PLAYER_NAMES[side]} has chosen ✓</span>
+        <span class="next-note">Shown when ${PLAYER_NAMES[otherSide(side)]} has chosen too</span>
+        <button type="button" class="link-button" data-tournament-change="${side}">Change</button>
+      </div>`;
+    }
+    if (!deck && !canChooseTournamentDeck(side)) {
+      return `<div class="next-side">
+        <p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}</p>
+        <span class="next-note is-waiting">Waiting for ${PLAYER_NAMES[otherSide(side)]} to choose first (won last game)</span>
+      </div>`;
+    }
     if (deck) {
       const canChange = chooses && t.kept !== side;
       return `<div class="next-side">
@@ -2469,15 +2538,30 @@ function renderTournamentView() {
         ${canChange ? `<button type="button" class="link-button" data-tournament-change="${side}">Change</button>` : ""}
       </div>`;
     }
+    // Once the opponent's deck is known (chosen openly, or kept by the last winner), each option shows
+    // its record against that deck instead of the start win rate.
+    const opponentDeck = t.current[deckKey(otherSide(side))];
+    const versus = opponentDeck && !tournamentChoiceHidden(otherSide(side)) ? opponentDeck : null;
+    const optionNote = (name) => {
+      if (!versus) return `${formatRate(startRateOf(side, name))} at start`;
+      const indexes = side === "row" ? getCellIndexesByDeckNames(name, versus) : getCellIndexesByDeckNames(versus, name);
+      const record = indexes ? getRecord(state.matrix[indexes.rowIndex][indexes.colIndex]) : null;
+      if (!record || !record.games) return `No games vs ${escapeHtml(versus)}`;
+      const own = side === "row" ? record.rowWins : record.columnWins;
+      const theirs = side === "row" ? record.columnWins : record.rowWins;
+      return `${own}–${theirs} vs ${escapeHtml(versus)}`;
+    };
     return `<div class="next-side">
-      <p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}: choose a deck</p>
-      <div class="choose-grid">${tournamentDrawPool(side)
+      <p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}: choose a deck${tournamentFirstChooser() === side ? " (you won, you choose first)" : ""}</p>
+      <div class="choose-grid">
+        <button type="button" class="choose-button is-random" data-tournament-random="${side}"><span>Random</span><small>any of these</small></button>${tournamentDrawPool(side)
         .map(
           (name) => `<button type="button" class="choose-button" data-tournament-choose="${side}" data-deck="${escapeHtml(name)}">
-            <span>${escapeHtml(name)}</span><small>${formatRate(startRateOf(side, name))} at start</small>
+            <span>${escapeHtml(name)}</span><small>${optionNote(name)}</small>
           </button>`
         )
-        .join("")}</div>
+        .join("")}
+      </div>
     </div>`;
   };
 
@@ -2523,6 +2607,7 @@ function renderTournamentView() {
   const rules = [
     modeLabel,
     t.winnerStays ? "winner keeps deck" : "",
+    t.hideChoices ? "hidden choices" : "",
     `${chooses ? "chosen" : "random"} from lowest ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE}`
   ]
     .filter(Boolean)
@@ -2566,6 +2651,11 @@ function bindTournamentEvents() {
     tournamentSetup.after = el.dataset.tournamentAfter;
     render();
   });
+  onClick("[data-tournament-reveal]", (el) => {
+    tournamentSetup.reveal = el.dataset.tournamentReveal;
+    render();
+  });
+  onClick("[data-tournament-random]", (el) => chooseRandomTournamentDeck(el.dataset.tournamentRandom));
   onClick("[data-tournament-pick-mode]", (el) => {
     tournamentSetup.pick = el.dataset.tournamentPickMode;
     render();
@@ -2634,6 +2724,22 @@ function startGame(rowDeck, columnDeck, inTournament = false) {
   // Hide the browser bars where allowed (not on iPhone); the counter fills the window either way.
   const root = document.documentElement;
   if (root.requestFullscreen && !document.fullscreenElement) root.requestFullscreen().catch(() => {});
+}
+
+// Browsers drop full screen when you leave for another app or tab; the game menu can bring it back.
+function canUseFullscreen() {
+  return Boolean(document.documentElement.requestFullscreen && document.exitFullscreen);
+}
+
+function toggleGameFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+    return;
+  }
+  game.menuOpen = false;
+  render();
+  keepScreenOn();
+  document.documentElement.requestFullscreen().catch(() => {});
 }
 
 function restartGame() {
@@ -2735,7 +2841,12 @@ function gameMenuMarkup() {
       <div class="game-menu-actions">${
         game.inTournament && game.logged
           ? `<button type="button" class="ghost-button is-wide" data-game-close ${holdAttr}>${moveOn(champion ? "See the tournament" : "Next matchup")}</button>`
-          : `<button type="button" class="ghost-button is-wide" data-game-resume>Back to game</button>
+          : `${
+            canUseFullscreen()
+              ? `<button type="button" class="ghost-button" data-game-resume>Back to game</button>
+        <button type="button" class="ghost-button" data-game-fullscreen>${document.fullscreenElement ? "Exit full screen" : "Full screen"}</button>`
+              : `<button type="button" class="ghost-button is-wide" data-game-resume>Back to game</button>`
+          }
         <button type="button" class="ghost-button" data-game-restart ${holdAttr}>${game.logged ? moveOn("Rematch") : "Restart game"}</button>
         <button type="button" class="ghost-button" data-game-close ${holdAttr}>${game.logged ? moveOn(game.inTournament ? "Back to tournament" : "Close game") : game.inTournament ? "Back to tournament" : "Close game"}</button>`
       }
@@ -2772,6 +2883,7 @@ function renderGameScreen() {
     game.menuOpen = false;
     render();
   });
+  onClick("[data-game-fullscreen]", toggleGameFullscreen);
   onClick("[data-sync-retry]", retrySyncNow);
 
   const backdrop = app.querySelector("[data-game-backdrop]");
@@ -2947,6 +3059,10 @@ async function initApp() {
     render();
   });
   window.addEventListener("offline", render);
+  // Keep the game menu's full screen button label in step with the browser.
+  document.addEventListener("fullscreenchange", () => {
+    if (game && game.menuOpen) render();
+  });
   window.addEventListener("beforeunload", (event) => {
     if (!hasUnsavedChanges()) return;
     event.preventDefault();
