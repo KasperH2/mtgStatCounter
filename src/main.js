@@ -1991,15 +1991,23 @@ function bindSharedEvents() {
 }
 
 // ---------- Tournament ----------
-// Each player ticks the same number of decks. Decks are ranked once, lowest win rate first, and every
-// game draws one deck per player at random from their 5 lowest-ranked decks still in. The losing (or,
-// in "winner is out" mode, the winning) deck leaves; the first player with no decks left ends it.
+// Each player ticks the same number of decks. Decks are ranked once, lowest win rate first. Each game
+// uses one deck per player from their lowest-ranked decks still in (how many is chosen at setup), drawn
+// at random or chosen by the players. The losing (or, in "winner is out" mode, the winning) deck leaves;
+// in loser-out mode the winner can keep their deck. The first player with no decks left ends it.
 
-const TOURNAMENT_DRAW_SIZES = [1, 2, 3, 4, 5];
 const DEFAULT_TOURNAMENT_DRAW_SIZE = 5;
 const TOURNAMENT_MODES = [
   ["loser", "Loser is out"],
   ["winner", "Winner is out"]
+];
+const TOURNAMENT_AFTER = [
+  ["both", "Both get new decks"],
+  ["stays", "Winner keeps their deck"]
+];
+const TOURNAMENT_PICKS = [
+  ["random", "Random"],
+  ["choose", "Choose yourselves"]
 ];
 
 let tournamentSetup = null;
@@ -2133,7 +2141,13 @@ function byName(a, b) {
 
 function openTournamentSetup() {
   tournamentPickScrollTop = 0;
-  tournamentSetup = { mode: "loser", drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE, picks: { row: [], column: [] } };
+  tournamentSetup = {
+    mode: "loser",
+    after: "both",
+    pick: "random",
+    drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE,
+    picks: { row: [], column: [] }
+  };
   renderAtTop();
 }
 
@@ -2148,6 +2162,25 @@ function setAllTournamentPicks(side, all) {
   render();
 }
 
+// The draw can use anything from the single lowest deck up to all the decks each player brought.
+function setupDrawLimit() {
+  const counts = [tournamentSetup.picks.row.length, tournamentSetup.picks.column.length].filter((n) => n > 0);
+  return counts.length ? Math.min(...counts) : DEFAULT_TOURNAMENT_DRAW_SIZE;
+}
+
+function setupDrawSize() {
+  return Math.max(1, Math.min(tournamentSetup.drawSize, setupDrawLimit()));
+}
+
+function stepTournamentDraw(delta) {
+  tournamentSetup.drawSize = Math.max(1, Math.min(setupDrawSize() + delta, setupDrawLimit()));
+  render();
+}
+
+function deckKey(side) {
+  return side === "row" ? "rowDeck" : "columnDeck";
+}
+
 function tournamentRemaining(side) {
   return tournament.order[side].filter((name) => !tournament.out[side].includes(name));
 }
@@ -2156,16 +2189,23 @@ function tournamentDrawPool(side) {
   return tournamentRemaining(side).slice(0, tournament.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE);
 }
 
-function drawTournamentMatchup() {
-  const pick = (side) => {
+function tournamentChooses() {
+  return tournament.pick === "choose";
+}
+
+// Fills in the next game's decks. The side in keepSide keeps its deck; the others are drawn at random,
+// or left empty for the player to choose.
+function fillTournamentMatchup(keepSide) {
+  ["row", "column"].forEach((side) => {
+    if (side === keepSide) return;
     const pool = tournamentDrawPool(side);
-    return pool[Math.floor(Math.random() * pool.length)];
-  };
-  tournament.current = { rowDeck: pick("row"), columnDeck: pick("column") };
+    // With only one deck to pick from there is nothing to choose, so it is filled in either way.
+    tournament.current[deckKey(side)] = tournamentChooses() && pool.length > 1 ? null : pool[Math.floor(Math.random() * pool.length)];
+  });
 }
 
 function startTournament() {
-  const { picks, mode, drawSize } = tournamentSetup;
+  const { picks, mode, after, pick } = tournamentSetup;
   if (!picks.row.length || picks.row.length !== picks.column.length) return;
 
   // Win rates are read once, here; the order and the rates shown stay fixed for the whole tournament.
@@ -2181,15 +2221,18 @@ function startTournament() {
 
   tournament = {
     mode,
+    pick,
+    winnerStays: mode === "loser" && after === "stays",
     startRates,
-    drawSize,
+    drawSize: setupDrawSize(),
     order: { row: rank("row"), column: rank("column") },
     out: { row: [], column: [] },
-    current: null,
+    current: { rowDeck: null, columnDeck: null },
+    kept: null,
     history: [],
     champion: null
   };
-  drawTournamentMatchup();
+  fillTournamentMatchup(null);
   tournamentSetup = null;
   tournamentEndArmed = false;
   saveTournament();
@@ -2204,14 +2247,22 @@ function advanceTournament(winner) {
   const outDeck = outSide === "row" ? rowDeck : columnDeck;
 
   tournament.out[outSide].push(outDeck);
-  tournament.history.unshift({ rowDeck, columnDeck, winner, outSide, outDeck });
+  tournament.history.unshift({ rowDeck, columnDeck, winner, outSide, outDeck, keptBefore: tournament.kept || null });
 
   if (!tournamentRemaining(outSide).length) {
     // Loser is out: the player who still has decks wins. Winner is out: the player whose decks all won.
     tournament.champion = tournament.mode === "loser" ? otherSide(outSide) : outSide;
     tournament.current = null;
+    tournament.kept = null;
+  } else if (tournament.winnerStays) {
+    // The winner plays on with the same deck; only the loser gets a new one.
+    tournament.kept = winner;
+    tournament.current = { rowDeck: winner === "row" ? rowDeck : null, columnDeck: winner === "column" ? columnDeck : null };
+    fillTournamentMatchup(winner);
   } else {
-    drawTournamentMatchup();
+    tournament.kept = null;
+    tournament.current = { rowDeck: null, columnDeck: null };
+    fillTournamentMatchup(null);
   }
   saveTournament();
 }
@@ -2225,6 +2276,7 @@ function undoTournamentGame() {
   tournament.out[last.outSide] = tournament.out[last.outSide].filter((name) => name !== last.outDeck);
   tournament.champion = null;
   tournament.current = { rowDeck: last.rowDeck, columnDeck: last.columnDeck };
+  tournament.kept = last.keptBefore || null;
   saveTournament();
 
   // Also take the result back out of the stats, if it is still the most recent game logged here.
@@ -2239,7 +2291,23 @@ function undoTournamentGame() {
 
 function redrawTournamentMatchup() {
   tournamentEndArmed = false;
-  drawTournamentMatchup();
+  fillTournamentMatchup(tournament.kept);
+  saveTournament();
+  render();
+}
+
+function chooseTournamentDeck(side, name) {
+  tournamentEndArmed = false;
+  if (!tournament.current || tournament.kept === side || !tournamentDrawPool(side).includes(name)) return;
+  tournament.current[deckKey(side)] = name;
+  saveTournament();
+  render();
+}
+
+function changeTournamentChoice(side) {
+  tournamentEndArmed = false;
+  if (!tournament.current || tournament.kept === side) return;
+  tournament.current[deckKey(side)] = null;
   saveTournament();
   render();
 }
@@ -2258,7 +2326,7 @@ function endTournament() {
 
 function startTournamentGame() {
   tournamentEndArmed = false;
-  if (!tournament || !tournament.current) return;
+  if (!tournament || !tournament.current || !tournament.current.rowDeck || !tournament.current.columnDeck) return;
   startGame(tournament.current.rowDeck, tournament.current.columnDeck, true);
 }
 
@@ -2269,10 +2337,12 @@ function tournamentModeNote(mode) {
 }
 
 function renderTournamentSetup() {
-  const { picks, mode } = tournamentSetup;
+  const { picks, mode, after, pick } = tournamentSetup;
   const rowCount = picks.row.length;
   const columnCount = picks.column.length;
   const ready = rowCount > 0 && rowCount === columnCount;
+  const drawSize = setupDrawSize();
+  const drawLimit = setupDrawLimit();
 
   const checklist = (side) => {
     const decks = [...(side === "row" ? state.rowDecks : state.columnDecks)].sort(byName);
@@ -2305,6 +2375,16 @@ function renderTournamentSetup() {
       ? "Tick the decks each of you wants to bring."
       : `Pick the same number of decks: ${PLAYER_NAMES.row} ${rowCount}, ${PLAYER_NAMES.column} ${columnCount}.`;
 
+  const lowest = drawSize === 1 ? "lowest-ranked deck" : `${drawSize} lowest-ranked decks`;
+  const pickNote =
+    pick === "choose"
+      ? drawSize === 1
+        ? "You each play your lowest-ranked deck still in."
+        : `You each choose your deck yourselves from your ${lowest} still in.`
+      : drawSize === 1
+        ? "Each game uses each player's lowest-ranked deck still in."
+        : `Each game draws at random from each player's ${lowest} still in.`;
+
   return `
     <section class="view-stack tournament-setup">
       <div class="view-head">
@@ -2314,17 +2394,28 @@ function renderTournamentSetup() {
       <div class="pick-scroll" data-pick-scroll>
         ${segmentedMarkup(TOURNAMENT_MODES, mode, "data-tournament-mode")}
         <p class="view-note">${tournamentModeNote(mode)}</p>
-        <p class="section-label">Draw from the lowest</p>
-        ${segmentedMarkup(
-          TOURNAMENT_DRAW_SIZES.map((size) => [String(size), String(size)]),
-          String(tournamentSetup.drawSize),
-          "data-tournament-draw"
-        )}
-        <p class="view-note">${
-          tournamentSetup.drawSize === 1
-            ? "Each game uses each player's lowest-ranked deck still in."
-            : `Each game draws at random from each player's ${tournamentSetup.drawSize} lowest-ranked decks still in.`
-        }</p>
+        ${
+          mode === "loser"
+            ? `<p class="section-label">After each game</p>
+              ${segmentedMarkup(TOURNAMENT_AFTER, after, "data-tournament-after")}
+              <p class="view-note">${
+                after === "stays"
+                  ? "The winner plays on with the same deck. Only the loser gets a new deck."
+                  : "Both players get a new deck for every game."
+              }</p>`
+            : ""
+        }
+        <p class="section-label">How decks are picked</p>
+        ${segmentedMarkup(TOURNAMENT_PICKS, pick, "data-tournament-pick-mode")}
+        <div class="card stepper-card">
+          <span class="stepper-label">From the lowest</span>
+          <div class="draw-stepper">
+            <button type="button" data-tournament-draw-step="-1" aria-label="Fewer decks to pick from" ${drawSize <= 1 ? "disabled" : ""}>−</button>
+            <b>${drawSize}</b>
+            <button type="button" data-tournament-draw-step="1" aria-label="More decks to pick from" ${drawSize >= drawLimit ? "disabled" : ""}>+</button>
+          </div>
+        </div>
+        <p class="view-note">${pickNote}${rowCount || columnCount ? "" : " Up to all the decks you bring."}</p>
         ${playerBlock("row")}
         ${playerBlock("column")}
       </div>
@@ -2340,52 +2431,80 @@ function renderTournamentSetup() {
 function renderTournamentView() {
   const t = tournament;
   const modeLabel = TOURNAMENT_MODES.find(([id]) => id === t.mode)[1];
+  const chooses = tournamentChooses();
+  const startRateOf = (side, name) => (t.startRates ? t.startRates[side][name] ?? null : null);
 
   const deckList = (side) => {
     const pool = tournamentDrawPool(side);
-    const playing = t.current && (side === "row" ? t.current.rowDeck : t.current.columnDeck);
+    const playing = t.current && t.current[deckKey(side)];
     return `<div class="card list">${t.order[side]
       .map((name, rank) => {
         const out = t.out[side].includes(name);
         const status = out
           ? ["out", "Out"]
           : name === playing
-            ? ["playing", "Playing"]
+            ? t.kept === side
+              ? ["playing", "Stays"]
+              : ["playing", "Playing"]
             : pool.includes(name)
-              ? ["draw", "In the draw"]
+              ? ["draw", chooses ? "Can be chosen" : "In the draw"]
               : ["waiting", "Waiting"];
-        const startRate = t.startRates ? t.startRates[side][name] : null;
         return `<div class="list-row tournament-deck is-${status[0]}">
           <span class="list-main"><span class="list-name">${rank + 1}. ${escapeHtml(name)}</span>
-            <span class="list-sub">${formatRate(startRate ?? null)} at start</span></span>
+            <span class="list-sub">${formatRate(startRateOf(side, name))} at start</span></span>
           <span class="verdict-chip is-${status[0]}">${status[1]}</span>
         </div>`;
       })
       .join("")}</div>`;
   };
 
+  // One player's part of the next game: their deck, or the decks they can choose from.
+  const sideBlock = (side) => {
+    const deck = t.current[deckKey(side)];
+    if (deck) {
+      const canChange = chooses && t.kept !== side;
+      return `<div class="next-side">
+        <span class="next-deck ink-${side}">${playerDot(side)}${escapeHtml(deck)}</span>
+        ${t.kept === side ? `<span class="next-note">Won last game, plays on</span>` : ""}
+        ${canChange ? `<button type="button" class="link-button" data-tournament-change="${side}">Change</button>` : ""}
+      </div>`;
+    }
+    return `<div class="next-side">
+      <p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}: choose a deck</p>
+      <div class="choose-grid">${tournamentDrawPool(side)
+        .map(
+          (name) => `<button type="button" class="choose-button" data-tournament-choose="${side}" data-deck="${escapeHtml(name)}">
+            <span>${escapeHtml(name)}</span><small>${formatRate(startRateOf(side, name))} at start</small>
+          </button>`
+        )
+        .join("")}</div>
+    </div>`;
+  };
+
   let main;
   if (t.champion) {
     main = `<article class="card champion-card is-${t.champion}">
       <p class="section-label">Tournament winner</p>
-      <p class="champion-name">${playerDot(t.champion)}${PLAYER_NAMES[t.champion]}</p>
+      <p class="champion-name">${PLAYER_NAMES[t.champion]}</p>
       <p class="view-note">${t.history.length} games played · ${modeLabel.toLowerCase()}</p>
     </article>`;
   } else {
     const { rowDeck, columnDeck } = t.current;
-    const indexes = getCellIndexesByDeckNames(rowDeck, columnDeck);
+    const ready = Boolean(rowDeck && columnDeck);
+    const indexes = ready ? getCellIndexesByDeckNames(rowDeck, columnDeck) : null;
     const record = indexes ? getRecord(state.matrix[indexes.rowIndex][indexes.colIndex]) : null;
-    main = `<article class="card h2h-card">
+    const redrawLabel = t.kept ? `Draw another deck for ${PLAYER_NAMES[otherSide(t.kept)]}` : "Draw another matchup";
+    main = `<article class="card h2h-card next-card">
       <p class="section-label">Next game</p>
-      <div class="next-matchup">
-        <span class="ink-row">${playerDot("row")}${escapeHtml(rowDeck)}</span>
-        <span class="vs-mark">vs</span>
-        <span class="ink-column">${playerDot("column")}${escapeHtml(columnDeck)}</span>
-      </div>
+      ${sideBlock("row")}
+      <span class="vs-mark">vs</span>
+      ${sideBlock("column")}
       ${record ? `${splitBarMarkup(record.rowWins, record.columnWins)}<p class="h2h-note">${record.rowWins}–${record.columnWins} so far</p>` : ""}
     </article>
-    <button type="button" class="start-game-button" data-tournament-play>Start game</button>
-    <button type="button" class="ghost-button" data-tournament-redraw>Draw another matchup</button>`;
+    <button type="button" class="start-game-button" data-tournament-play ${ready ? "" : "disabled"}>${
+      ready ? "Start game" : "Choose both decks to start"
+    }</button>
+    ${chooses ? "" : `<button type="button" class="ghost-button" data-tournament-redraw>${redrawLabel}</button>`}`;
   }
 
   const history = t.history.length
@@ -2401,6 +2520,14 @@ function renderTournamentView() {
         .join("")}</div>`
     : "";
 
+  const rules = [
+    modeLabel,
+    t.winnerStays ? "winner keeps deck" : "",
+    `${chooses ? "chosen" : "random"} from lowest ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE}`
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return `
     <section class="view-stack">
       <div class="view-head">
@@ -2408,7 +2535,8 @@ function renderTournamentView() {
         ${menuMarkup()}
       </div>
       <p class="save-state is-${tournamentSyncNote()[0]}">${tournamentSyncNote()[1]}</p>
-      <p class="view-note">${modeLabel} · lowest ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE} · ${PLAYER_NAMES.row} ${tournamentRemaining("row").length} left · ${PLAYER_NAMES.column} ${
+      <p class="view-note">${rules}</p>
+      <p class="view-note">${PLAYER_NAMES.row} ${tournamentRemaining("row").length} left · ${PLAYER_NAMES.column} ${
         tournamentRemaining("column").length
       } left</p>
       ${main}
@@ -2429,12 +2557,17 @@ function renderTournamentView() {
 
 function bindTournamentEvents() {
   onClick("[data-tournament-open]", openTournamentSetup);
-  onClick("[data-tournament-draw]", (el) => {
-    tournamentSetup.drawSize = Number(el.dataset.tournamentDraw);
-    render();
-  });
+  onClick("[data-tournament-draw-step]", (el) => stepTournamentDraw(Number(el.dataset.tournamentDrawStep)));
   onClick("[data-tournament-mode]", (el) => {
     tournamentSetup.mode = el.dataset.tournamentMode;
+    render();
+  });
+  onClick("[data-tournament-after]", (el) => {
+    tournamentSetup.after = el.dataset.tournamentAfter;
+    render();
+  });
+  onClick("[data-tournament-pick-mode]", (el) => {
+    tournamentSetup.pick = el.dataset.tournamentPickMode;
     render();
   });
   onClick("[data-tournament-all]", (el) => setAllTournamentPicks(el.dataset.tournamentAll, true));
@@ -2446,6 +2579,8 @@ function bindTournamentEvents() {
   });
   onClick("[data-tournament-play]", startTournamentGame);
   onClick("[data-tournament-redraw]", redrawTournamentMatchup);
+  onClick("[data-tournament-choose]", (el) => chooseTournamentDeck(el.dataset.tournamentChoose, el.dataset.deck));
+  onClick("[data-tournament-change]", (el) => changeTournamentChoice(el.dataset.tournamentChange));
   onClick("[data-tournament-undo]", undoTournamentGame);
   onClick("[data-tournament-end]", endTournament);
 
