@@ -154,23 +154,67 @@ function wait(ms) {
 // normal retry takes over.
 const REQUEST_TIMEOUT_MS = 10000;
 
+// Settles after the time limit even if the request never got to start (for example while it waits
+// for the sign-in token), so the app can show the problem and retry.
 function timed(query) {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  return Promise.resolve(query.abortSignal(controller.signal)).then(
-    (result) => {
-      window.clearTimeout(timer);
-      return result;
-    },
-    (error) => {
-      window.clearTimeout(timer);
-      return { data: null, error };
-    }
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = window.setTimeout(() => {
+      controller.abort();
+      resolve({ data: null, error: { message: "Request timed out" } });
+    }, REQUEST_TIMEOUT_MS);
+  });
+  const request = Promise.resolve(query.abortSignal(controller.signal)).then(
+    (result) => result,
+    (error) => ({ data: null, error })
   );
+  return Promise.race([request, timeout]).finally(() => window.clearTimeout(timer));
 }
 
 function sameInstant(a, b) {
   return Boolean(a && b) && Date.parse(a) === Date.parse(b);
+}
+
+function withTimeout(promise, ms) {
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = window.setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([Promise.resolve(promise).catch(() => null), timeout]).finally(() => window.clearTimeout(timer));
+}
+
+// Refreshes the sign-in token ahead of time, so logging a result never has to wait for a refresh
+// right after the phone has been sitting idle. Never blocks anything: it gives up quietly on a time limit.
+let sessionRefreshInFlight = false;
+
+async function freshenSession(minMinutesLeft) {
+  if (!supabase || !currentUser || sessionRefreshInFlight || !navigator.onLine) return;
+  sessionRefreshInFlight = true;
+  try {
+    const current = await withTimeout(supabase.auth.getSession(), 10000);
+    const session = current && current.data ? current.data.session : null;
+    if (!session || !session.expires_at) return;
+    const msLeft = session.expires_at * 1000 - Date.now();
+    if (msLeft < minMinutesLeft * 60000) await withTimeout(supabase.auth.refreshSession(), 20000);
+  } finally {
+    sessionRefreshInFlight = false;
+  }
+}
+
+const GAME_SESSION_CHECK_MS = 5 * 60000;
+let gameSessionTimer = null;
+
+function startGameSessionKeeper() {
+  stopGameSessionKeeper();
+  gameSessionTimer = window.setInterval(() => {
+    if (game && document.visibilityState === "visible") freshenSession(15);
+  }, GAME_SESSION_CHECK_MS);
+}
+
+function stopGameSessionKeeper() {
+  if (gameSessionTimer) window.clearInterval(gameSessionTimer);
+  gameSessionTimer = null;
 }
 
 function clearSaveRetryTimer() {
@@ -193,7 +237,7 @@ function scheduleSavedIndicatorReset() {
       saveStatus = "idle";
       render();
     }
-  }, 1200);
+  }, 2000);
 }
 
 function getCellIndexesByDeckNames(rowDeck, columnDeck) {
@@ -901,6 +945,29 @@ function recordResult(rowIndex, colIndex, winner) {
   render();
 }
 
+// Takes one win (and so one game) away from a deck in this matchup; games always equal the wins added up.
+function removeWin(rowIndex, colIndex, winner) {
+  const cell = state.matrix[rowIndex][colIndex];
+  const record = getRecord(cell);
+  if ((winner === "row" ? record.rowWins : record.columnWins) < 1) return;
+
+  const rowDeck = state.rowDecks[rowIndex];
+  const columnDeck = state.columnDecks[colIndex];
+  const scoreDelta = winner === "column" ? -1 : 1;
+  cell.score += scoreDelta;
+  cell.games = Math.max(0, cell.games - 1);
+  queueCellSyncOperation(rowDeck, columnDeck, scoreDelta, -1);
+
+  // If that win was logged this session, drop it from the list so Undo can't remove it a second time.
+  const logged = sessionLog.findIndex(
+    (entry) => entry.rowDeck === rowDeck && entry.columnDeck === columnDeck && entry.winner === winner
+  );
+  if (logged !== -1) sessionLog.splice(logged, 1);
+
+  showToast(`Removed a win for ${PLAYER_NAMES[winner]}'s ${winner === "row" ? rowDeck : columnDeck}`);
+  render();
+}
+
 function undoLastResult() {
   const last = sessionLog.shift();
   if (!last) return;
@@ -1107,21 +1174,9 @@ function updateDeckName(type, index, value) {
   render();
 }
 
-function nudgeGames(rowIndex, colIndex, delta) {
-  const cell = state.matrix[rowIndex][colIndex];
-  const previousGames = cell.games;
-  cell.games = Math.max(0, cell.games + delta);
-  const effectiveDelta = cell.games - previousGames;
-  if (effectiveDelta !== 0) {
-    queueCellSyncOperation(state.rowDecks[rowIndex], state.columnDecks[colIndex], 0, effectiveDelta);
-  }
-
-  render();
-}
-
 function setActiveEditor(rowIndex, colIndex) {
   const isSame = activeEditor && activeEditor.row === rowIndex && activeEditor.col === colIndex;
-  activeEditor = isSame ? null : { row: rowIndex, col: colIndex, revealGamesEditor: false };
+  activeEditor = isSame ? null : { row: rowIndex, col: colIndex, removeMode: false };
   render();
 }
 
@@ -1210,45 +1265,40 @@ function buildScoreCell(rowIndex, colIndex, cellData) {
       stats.append(chip);
     });
 
+    // Add or remove wins; the game count follows the wins.
+    const removing = activeEditor.removeMode;
+    const modeToggle = document.createElement("div");
+    modeToggle.className = "segmented editor-mode-toggle";
+    [
+      [false, "Add win"],
+      [true, "Remove win"]
+    ].forEach(([mode, text]) => {
+      const button = makeButton(mode === removing ? "on" : "", text, () => {
+        activeEditor = { row: rowIndex, col: colIndex, removeMode: mode };
+        render();
+      });
+      button.setAttribute("aria-pressed", String(mode === removing));
+      modeToggle.append(button);
+    });
+
     const label = document.createElement("p");
-    label.className = "editor-mode-label";
-    label.textContent = "Who won?";
+    label.className = `editor-mode-label ${removing ? "is-warning" : ""}`;
+    label.textContent = removing ? "Take one win away from:" : "Who won?";
 
     const winRow = document.createElement("div");
     winRow.className = "win-buttons";
-    winRow.append(
-      makeButton("win-button is-row", rowDeck, () => recordResult(rowIndex, colIndex, "row")),
-      makeButton("win-button is-column", columnDeck, () => recordResult(rowIndex, colIndex, "column"))
-    );
-    winRow.children[0].insertAdjacentHTML("beforeend", `<small>${PLAYER_NAMES.row}</small>`);
-    winRow.children[1].insertAdjacentHTML("beforeend", `<small>${PLAYER_NAMES.column}</small>`);
-
-    popover.append(closeButton, title, stats, label, winRow);
-
-    if (activeEditor.revealGamesEditor) {
-      const warning = document.createElement("p");
-      warning.className = "editor-mode-label is-warning";
-      warning.textContent = "Fixing the games count only. Wins stay the same.";
-
-      const editorRow = document.createElement("div");
-      editorRow.className = "editor-row";
-      const editValue = document.createElement("span");
-      editValue.className = "editor-value";
-      editValue.textContent = String(record.games);
-      editorRow.append(
-        makeButton("editor-button", "-", () => nudgeGames(rowIndex, colIndex, -1)),
-        editValue,
-        makeButton("editor-button", "+", () => nudgeGames(rowIndex, colIndex, 1))
+    ["row", "column"].forEach((side) => {
+      const deck = side === "row" ? rowDeck : columnDeck;
+      const wins = side === "row" ? record.rowWins : record.columnWins;
+      const button = makeButton(`win-button is-${side} ${removing ? "is-remove" : ""}`, removing ? `− ${deck}` : deck, () =>
+        removing ? removeWin(rowIndex, colIndex, side) : recordResult(rowIndex, colIndex, side)
       );
-      popover.append(warning, editorRow);
-    } else {
-      popover.append(
-        makeButton("editor-reveal-button", "Fix no. of games played", () => {
-          activeEditor = { row: rowIndex, col: colIndex, revealGamesEditor: true };
-          render();
-        })
-      );
-    }
+      button.insertAdjacentHTML("beforeend", `<small>${PLAYER_NAMES[side]}${removing ? ` · ${wins} ${wins === 1 ? "win" : "wins"}` : ""}</small>`);
+      if (removing && wins < 1) button.disabled = true;
+      winRow.append(button);
+    });
+
+    popover.append(closeButton, title, stats, modeToggle, label, winRow);
 
     cell.classList.add("is-editing");
     shell.append(popover);
@@ -1310,7 +1360,7 @@ function menuMarkup() {
   </div>`;
 }
 
-function syncBannerMarkup() {
+function syncBannerMarkup({ showProgress = true } = {}) {
   const unsaved = pendingCellOps.length;
   const unsavedText = unsaved === 1 ? "1 change is" : `${unsaved} changes are`;
   let message = "";
@@ -1327,7 +1377,14 @@ function syncBannerMarkup() {
     message = "Live updates paused. Reconnecting. You'll get the other phone's games when it's back.";
   }
 
-  if (!message) return "";
+  if (!message) {
+    if (!showProgress) return "";
+    if (saveStatus === "pending" || saveStatus === "saving") {
+      return `<div class="sync-banner is-saving" role="status"><span>Saving…</span></div>`;
+    }
+    if (saveStatus === "saved") return `<div class="sync-banner is-saved" role="status"><span>Saved ✓</span></div>`;
+    return "";
+  }
   return `<div class="sync-banner" role="alert">
     <span>${message}</span>
     ${navigator.onLine ? '<button type="button" class="banner-button" data-sync-retry>Retry now</button>' : ""}
@@ -2435,6 +2492,9 @@ function startGame(rowDeck, columnDeck, inTournament = false) {
   accountOpen = false;
   render();
 
+  freshenSession(55);
+  startGameSessionKeeper();
+
   keepScreenOn();
   // Hide the browser bars where allowed (not on iPhone); the counter fills the window either way.
   const root = document.documentElement;
@@ -2450,6 +2510,7 @@ function closeGame() {
   if (!game.inTournament) logPick = { rowDeck: game.rowDeck, columnDeck: game.columnDeck };
   game = null;
   releaseScreen();
+  stopGameSessionKeeper();
   if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
   render();
 }
@@ -2506,7 +2567,7 @@ function loggedSaveState() {
     if (saveStatus === "error") return { kind: "error", label: "Not saved yet. Retrying…" };
     return { kind: "saving", label: "Saving…" };
   }
-  return { kind: "saved", label: "Saved" };
+  return { kind: "saved", label: "Saved ✓" };
 }
 
 function gameMenuMarkup() {
@@ -2514,9 +2575,16 @@ function gameMenuMarkup() {
 
   const deckOf = (side) => escapeHtml(side === "row" ? game.rowDeck : game.columnDeck);
   const champion = game.inTournament && tournament && tournament.champion;
+  const save = game.logged ? loggedSaveState() : null;
+  const waiting = save && save.kind === "saving";
+  const failed = save && save.kind === "error";
+  // While saving, moving on is blocked (usually under a second); after a failure it is allowed but
+  // says plainly that the save is still pending.
+  const moveOn = (label) => (failed ? `${label} anyway (keeps retrying)` : label);
+  const holdAttr = waiting ? "disabled" : "";
   const result = game.logged
     ? `<p class="game-menu-note">${playerDot(game.logged)}Logged: ${PLAYER_NAMES[game.logged]}'s ${deckOf(game.logged)} won</p>
-      <p class="save-state is-${loggedSaveState().kind}" role="status">${loggedSaveState().label}</p>${
+      <p class="save-state is-big is-${save.kind}" role="status">${save.label}</p>${
         champion ? `<p class="game-menu-note is-champion">${playerDot(champion)}${PLAYER_NAMES[champion]} wins the tournament</p>` : ""
       }`
     : `<p class="section-label">Who won?</p>
@@ -2527,14 +2595,14 @@ function gameMenuMarkup() {
 
   return `<div class="game-menu-backdrop" data-game-backdrop>
     <div class="game-menu" role="dialog" aria-label="Game menu">
-      ${syncBannerMarkup()}
+      ${syncBannerMarkup({ showProgress: false })}
       <div class="game-menu-result">${result}</div>
       <div class="game-menu-actions">${
         game.inTournament && game.logged
-          ? `<button type="button" class="ghost-button is-wide" data-game-close>${champion ? "See the tournament" : "Next matchup"}</button>`
+          ? `<button type="button" class="ghost-button is-wide" data-game-close ${holdAttr}>${moveOn(champion ? "See the tournament" : "Next matchup")}</button>`
           : `<button type="button" class="ghost-button is-wide" data-game-resume>Back to game</button>
-        <button type="button" class="ghost-button" data-game-restart>${game.logged ? "Rematch" : "Restart game"}</button>
-        <button type="button" class="ghost-button" data-game-close>${game.inTournament ? "Back to tournament" : "Close game"}</button>`
+        <button type="button" class="ghost-button" data-game-restart ${holdAttr}>${game.logged ? moveOn("Rematch") : "Restart game"}</button>
+        <button type="button" class="ghost-button" data-game-close ${holdAttr}>${game.logged ? moveOn(game.inTournament ? "Back to tournament" : "Close game") : game.inTournament ? "Back to tournament" : "Close game"}</button>`
       }
       </div>
     </div>
@@ -2559,6 +2627,7 @@ function renderGameScreen() {
   onClick("[data-life]", (el) => changeLife(el.dataset.life, Number(el.dataset.amount)));
   onClick("[data-game-menu]", () => {
     game.menuOpen = !game.menuOpen;
+    if (game.menuOpen) freshenSession(10);
     render();
   });
   onClick("[data-game-win]", (el) => logGameWinner(el.dataset.gameWin));
@@ -2665,6 +2734,7 @@ async function handleSession(session) {
     pendingCellOps = [];
     sessionLog = [];
     game = null;
+    stopGameSessionKeeper();
     tournamentSetup = null;
     releaseScreen();
     if (saveTimer) {
@@ -2732,7 +2802,10 @@ async function initApp() {
     if (document.visibilityState !== "visible") return;
     retrySyncNow();
     // The browser drops the screen wake lock when the page is hidden.
-    if (game) keepScreenOn();
+    if (game) {
+      keepScreenOn();
+      freshenSession(15);
+    }
   });
   window.addEventListener("online", () => {
     retrySyncNow();

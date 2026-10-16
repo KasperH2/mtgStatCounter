@@ -34,6 +34,9 @@
   --alert-bg: #ffe5e5;
   --alert-ink: #5f1e1e;
   --alert-border: #de9999;
+  --wait-bg: #fff1cc;
+  --wait-ink: #5c3d00;
+  --wait-border: #e2b04a;
   --on-strong: #ffffff;
   --good-ink: #0a7d0a;
   --start-bg: #1e3a64;
@@ -74,6 +77,9 @@
   --alert-bg: #452323;
   --alert-ink: #ffd9d9;
   --alert-border: #7f4a4a;
+  --wait-bg: #4a3a12;
+  --wait-ink: #ffe3a3;
+  --wait-border: #8a6a20;
   --on-strong: #ffffff;
   --good-ink: #4cc44c;
   --start-bg: #23477a;
@@ -470,70 +476,6 @@ body {
   color: #ff8f8f;
 }
 
-.editor-row {
-  display: grid;
-  grid-template-columns: 54px 1fr 54px;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.editor-value {
-  width: 100%;
-  min-height: 52px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  text-align: center;
-  padding: 0.46rem 0.18rem;
-  font-family: var(--font-body);
-  font-weight: 700;
-  line-height: 1;
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 1.18rem;
-}
-
-.editor-button {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  width: 100%;
-  min-height: 52px;
-  line-height: 1;
-  padding: 0;
-  font-size: 1.6rem;
-  font-weight: 700;
-  cursor: pointer;
-  background: var(--surface-2);
-  color: var(--ink);
-}
-
-.editor-reveal-button {
-  border: 1px solid var(--ctrl-view-border);
-  border-radius: 10px;
-  width: 100%;
-  min-height: 52px;
-  padding: 0.55rem 0.6rem;
-  font-family: var(--font-display);
-  font-size: 0.84rem;
-  font-weight: 700;
-  line-height: 1.2;
-  cursor: pointer;
-  background: var(--ctrl-view-bg);
-  color: var(--ctrl-view-ink);
-}
-
-.side-minus {
-  background: var(--surface-2);
-  color: var(--ink);
-}
-
-.side-plus {
-  background: var(--surface-2);
-  color: var(--ink);
-}
-
 @media (max-width: 1500px) {
   .cell-popover {
     width: min(300px, 90vw);
@@ -547,15 +489,6 @@ body {
 
   .editor-stat-chip {
     font-size: 0.74rem;
-  }
-
-  .editor-value {
-    font-size: 1.06rem;
-  }
-
-  .editor-button {
-    min-height: 48px;
-    font-size: 1.45rem;
   }
 }
 
@@ -1451,23 +1384,49 @@ select:focus-visible {
   }
 }
 
-/* Sync status: chip in the top bar {
-  background: var(--live-bg);
-  color: var(--live-ink);
-  border-color: var(--live-border);
-}
+/* Sync status: a warning above the page when saving fails or the connection drops */
 
 .sync-banner {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.55rem 1rem;
-  border-bottom: 1px solid var(--alert-border);
+  gap: 0.75rem;
+  margin: calc(0.5rem + env(safe-area-inset-top, 0px)) 0.75rem 0;
+  padding: 0.85rem 1rem;
+  border: 2px solid var(--alert-border);
+  border-radius: 14px;
   background: var(--alert-bg);
   color: var(--alert-ink);
-  font-size: 0.86rem;
-  font-weight: 600;
+  font-size: 1.05rem;
+  font-weight: 700;
   line-height: 1.35;
+}
+
+/* Brief progress messages float at the top so they never push the page around */
+.sync-banner.is-saving,
+.sync-banner.is-saved {
+  position: fixed;
+  top: calc(0.5rem + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4000;
+  width: min(420px, calc(100vw - 1.5rem));
+  box-shadow: 0 10px 30px #00000055;
+}
+
+.sync-banner.is-saving {
+  justify-content: center;
+  border-color: var(--wait-border);
+  background: var(--wait-bg);
+  color: var(--wait-ink);
+  font-size: 1.25rem;
+}
+
+.sync-banner.is-saved {
+  justify-content: center;
+  border-color: var(--live-border);
+  background: var(--live-bg);
+  color: var(--live-ink);
+  font-size: 1.25rem;
 }
 
 .banner-button {
@@ -2038,4 +1997,69 @@ select:focus-visible {
 .save-state.is-local {
   color: var(--muted);
   font-weight: 600;
+}
+
+/* Grid editor: add or remove wins */
+.editor-mode-toggle button {
+  min-height: 40px;
+}
+
+.win-button.is-remove {
+  background: transparent;
+  border: 2px dashed currentColor;
+}
+
+.win-button.is-remove.is-row {
+  color: var(--kasper-ink);
+}
+
+.win-button.is-remove.is-column {
+  color: var(--daniel-ink);
+}
+
+.win-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.game-menu .sync-banner {
+  position: static;
+  transform: none;
+  width: auto;
+  box-shadow: none;
+  margin: 0;
+}
+
+/* Big save status after logging a winner in the game menu */
+.save-state.is-big {
+  padding: 0.85rem;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  line-height: 1.2;
+}
+
+.save-state.is-big.is-saving {
+  color: var(--wait-ink);
+  background: var(--wait-bg);
+  border-color: var(--wait-border);
+}
+
+.save-state.is-big.is-saved {
+  color: var(--live-ink);
+  background: var(--live-bg);
+  border-color: var(--live-border);
+}
+
+.save-state.is-big.is-error {
+  color: var(--alert-ink);
+  background: var(--alert-bg);
+  border-color: var(--alert-border);
+  font-size: 1.15rem;
+}
+
+.ghost-button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
