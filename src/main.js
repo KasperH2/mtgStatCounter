@@ -2150,11 +2150,11 @@ function byName(a, b) {
 function openTournamentSetup() {
   tournamentPickScrollTop = 0;
   tournamentSetup = {
-    mode: "loser",
+    mode: "winner",
     after: "both",
     reveal: "open",
     direction: "low",
-    pick: "random",
+    pick: "choose",
     drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE,
     picks: { row: [], column: [] }
   };
@@ -2316,9 +2316,10 @@ function redrawTournamentMatchup() {
 }
 
 // From the second game on, the winner of the last game chooses first (when both players choose).
+// With hidden choices nobody sees the other's pick, so the order doesn't matter and both choose freely.
 function tournamentFirstChooser() {
   const t = tournament;
-  if (!tournamentChooses() || t.kept || !t.current || !t.history.length) return null;
+  if (!tournamentChooses() || t.hideChoices || t.kept || !t.current || !t.history.length) return null;
   const winner = t.history[0].winner;
   return t.current[deckKey(winner)] ? null : winner;
 }
@@ -2459,7 +2460,7 @@ function renderTournamentSetup() {
             ? `${segmentedMarkup(TOURNAMENT_REVEAL, tournamentSetup.reveal, "data-tournament-reveal")}
               <p class="view-note">${
                 tournamentSetup.reveal === "hidden"
-                  ? "Your choice stays secret until the other player has chosen too. From the second game on, the last winner chooses first."
+                  ? "Your choice stays secret until the other player has chosen too, so you can both choose at the same time."
                   : "You see each other's choice right away. From the second game on, the last winner chooses first."
               }</p>`
             : ""
