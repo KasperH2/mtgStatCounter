@@ -2175,9 +2175,18 @@ select:focus-visible {
 }
 
 /* Tournament choosing: random pick, secret choices, waiting for the last winner */
-.choose-button.is-random {
-  border-style: dashed;
+/* Small Random button on its own, outside the deck grid */
+.random-pick {
+  min-height: 36px;
+  padding: 0 1rem;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
   background: transparent;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .next-deck.is-secret {

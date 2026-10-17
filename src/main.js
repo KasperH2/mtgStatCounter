@@ -1991,8 +1991,8 @@ function bindSharedEvents() {
 }
 
 // ---------- Tournament ----------
-// Each player ticks the same number of decks. Decks are ranked once, lowest win rate first. Each game
-// uses one deck per player from their lowest-ranked decks still in (how many is chosen at setup), drawn
+// Each player ticks the same number of decks. Decks are ranked once by win rate, lowest or highest first.
+// Each game uses one deck per player from the first decks in that order still in (how many is chosen at setup), drawn
 // at random or chosen by the players. The losing (or, in "winner is out" mode, the winning) deck leaves;
 // in loser-out mode the winner can keep their deck. The first player with no decks left ends it.
 
@@ -2008,6 +2008,10 @@ const TOURNAMENT_AFTER = [
 const TOURNAMENT_REVEAL = [
   ["open", "Show choices right away"],
   ["hidden", "Hide until both have chosen"]
+];
+const TOURNAMENT_DIRECTIONS = [
+  ["low", "Lowest win rate"],
+  ["high", "Highest win rate"]
 ];
 const TOURNAMENT_PICKS = [
   ["random", "Random"],
@@ -2149,6 +2153,7 @@ function openTournamentSetup() {
     mode: "loser",
     after: "both",
     reveal: "open",
+    direction: "low",
     pick: "random",
     drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE,
     picks: { row: [], column: [] }
@@ -2167,7 +2172,7 @@ function setAllTournamentPicks(side, all) {
   render();
 }
 
-// The draw can use anything from the single lowest deck up to all the decks each player brought.
+// The draw can use anything from the single first-ranked deck up to all the decks each player brought.
 function setupDrawLimit() {
   const counts = [tournamentSetup.picks.row.length, tournamentSetup.picks.column.length].filter((n) => n > 0);
   return counts.length ? Math.min(...counts) : DEFAULT_TOURNAMENT_DRAW_SIZE;
@@ -2194,6 +2199,10 @@ function tournamentDrawPool(side) {
   return tournamentRemaining(side).slice(0, tournament.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE);
 }
 
+function directionWord(direction) {
+  return direction === "high" ? "highest" : "lowest";
+}
+
 function tournamentChooses() {
   return tournament.pick === "choose";
 }
@@ -2210,23 +2219,27 @@ function fillTournamentMatchup(keepSide) {
 }
 
 function startTournament() {
-  const { picks, mode, after, pick, reveal } = tournamentSetup;
+  const { picks, mode, after, pick, reveal, direction } = tournamentSetup;
   if (!picks.row.length || picks.row.length !== picks.column.length) return;
 
   // Win rates are read once, here; the order and the rates shown stay fixed for the whole tournament.
-  // Lowest win rate first; decks with no games count as lowest.
+  // Lowest or highest win rate first; decks with no games count as lowest, so in "highest" they come last.
   const startRates = { row: {}, column: {} };
   ["row", "column"].forEach((side) => {
     picks[side].forEach((name) => {
       startRates[side][name] = deckRate(side, name)?.rate ?? null;
     });
   });
+  const rateFor = (side, name) => startRates[side][name] ?? -1;
   const rank = (side) =>
-    [...picks[side]].sort((a, b) => (startRates[side][a] ?? -1) - (startRates[side][b] ?? -1) || byName(a, b));
+    [...picks[side]].sort((a, b) =>
+      (direction === "high" ? rateFor(side, b) - rateFor(side, a) : rateFor(side, a) - rateFor(side, b)) || byName(a, b)
+    );
 
   tournament = {
     mode,
     pick,
+    direction,
     winnerStays: mode === "loser" && after === "stays",
     hideChoices: pick === "choose" && reveal === "hidden",
     startRates,
@@ -2408,15 +2421,16 @@ function renderTournamentSetup() {
       ? "Tick the decks each of you wants to bring."
       : `Pick the same number of decks: ${PLAYER_NAMES.row} ${rowCount}, ${PLAYER_NAMES.column} ${columnCount}.`;
 
-  const lowest = drawSize === 1 ? "lowest-ranked deck" : `${drawSize} lowest-ranked decks`;
+  const edge = directionWord(tournamentSetup.direction);
+  const firstDecks = drawSize === 1 ? `${edge}-ranked deck` : `${drawSize} ${edge}-ranked decks`;
   const pickNote =
     pick === "choose"
       ? drawSize === 1
-        ? "You each play your lowest-ranked deck still in."
-        : `You each choose your deck yourselves from your ${lowest} still in.`
+        ? `You each play your ${edge}-ranked deck still in.`
+        : `You each choose your deck yourselves from your ${firstDecks} still in.`
       : drawSize === 1
-        ? "Each game uses each player's lowest-ranked deck still in."
-        : `Each game draws at random from each player's ${lowest} still in.`;
+        ? `Each game uses each player's ${edge}-ranked deck still in.`
+        : `Each game draws at random from each player's ${firstDecks} still in.`;
 
   return `
     <section class="view-stack tournament-setup">
@@ -2450,8 +2464,10 @@ function renderTournamentSetup() {
               }</p>`
             : ""
         }
+        <p class="section-label">Start from</p>
+        ${segmentedMarkup(TOURNAMENT_DIRECTIONS, tournamentSetup.direction, "data-tournament-direction")}
         <div class="card stepper-card">
-          <span class="stepper-label">From the lowest</span>
+          <span class="stepper-label">From the ${edge}</span>
           <div class="draw-stepper">
             <button type="button" data-tournament-draw-step="-1" aria-label="Fewer decks to pick from" ${drawSize <= 1 ? "disabled" : ""}>−</button>
             <b>${drawSize}</b>
@@ -2551,17 +2567,19 @@ function renderTournamentView() {
       const theirs = side === "row" ? record.columnWins : record.rowWins;
       return `${own}–${theirs} vs ${escapeHtml(versus)}`;
     };
+    const grid = `<div class="choose-grid">${tournamentDrawPool(side)
+      .map(
+        (name) => `<button type="button" class="choose-button" data-tournament-choose="${side}" data-deck="${escapeHtml(name)}">
+          <span>${escapeHtml(name)}</span><small>${optionNote(name)}</small>
+        </button>`
+      )
+      .join("")}</div>`;
+    const randomButton = `<button type="button" class="random-pick" data-tournament-random="${side}">Random deck</button>`;
+    // Random sits on the outside (above the top list, below the bottom one), so the two sets of decks
+    // meet around "vs" and are easy to compare.
     return `<div class="next-side">
       <p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}: choose a deck${tournamentFirstChooser() === side ? " (you won, you choose first)" : ""}</p>
-      <div class="choose-grid">
-        <button type="button" class="choose-button is-random" data-tournament-random="${side}"><span>Random</span><small>any of these</small></button>${tournamentDrawPool(side)
-        .map(
-          (name) => `<button type="button" class="choose-button" data-tournament-choose="${side}" data-deck="${escapeHtml(name)}">
-            <span>${escapeHtml(name)}</span><small>${optionNote(name)}</small>
-          </button>`
-        )
-        .join("")}
-      </div>
+      ${side === "row" ? `${randomButton}${grid}` : `${grid}${randomButton}`}
     </div>`;
   };
 
@@ -2608,7 +2626,7 @@ function renderTournamentView() {
     modeLabel,
     t.winnerStays ? "winner keeps deck" : "",
     t.hideChoices ? "hidden choices" : "",
-    `${chooses ? "chosen" : "random"} from lowest ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE}`
+    `${chooses ? "chosen" : "random"} from ${directionWord(t.direction)} ${t.drawSize || DEFAULT_TOURNAMENT_DRAW_SIZE}`
   ]
     .filter(Boolean)
     .join(" · ");
@@ -2625,9 +2643,9 @@ function renderTournamentView() {
         tournamentRemaining("column").length
       } left</p>
       ${main}
-      <p class="section-label">${playerDot("row")}${PLAYER_NAMES.row}'s decks, lowest win rate first</p>
+      <p class="section-label">${playerDot("row")}${PLAYER_NAMES.row}'s decks, ${directionWord(t.direction)} win rate first</p>
       ${deckList("row")}
-      <p class="section-label">${playerDot("column")}${PLAYER_NAMES.column}'s decks, lowest win rate first</p>
+      <p class="section-label">${playerDot("column")}${PLAYER_NAMES.column}'s decks, ${directionWord(t.direction)} win rate first</p>
       ${deckList("column")}
       ${history}
       <div class="two-buttons">
@@ -2649,6 +2667,10 @@ function bindTournamentEvents() {
   });
   onClick("[data-tournament-after]", (el) => {
     tournamentSetup.after = el.dataset.tournamentAfter;
+    render();
+  });
+  onClick("[data-tournament-direction]", (el) => {
+    tournamentSetup.direction = el.dataset.tournamentDirection;
     render();
   });
   onClick("[data-tournament-reveal]", (el) => {
