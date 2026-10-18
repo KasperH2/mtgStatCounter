@@ -2803,26 +2803,29 @@ function closeGame() {
   render();
 }
 
-// Holding a − / + side for half a second changes life by 10, and again every 0.6 s while held.
-const LIFE_HOLD_MS = 500;
-const LIFE_REPEAT_MS = 600;
+// Holding a − / + side for a second changes life by 10, once per hold.
+const LIFE_HOLD_MS = 1000;
 let lifeHold = null;
 let suppressLifeClickUntil = 0;
 
 function startLifeHold(side, direction) {
   stopLifeHold();
-  const step = () => {
-    if (!game || !lifeHold) return;
-    suppressLifeClickUntil = Date.now() + 700;
-    changeLife(side, direction * 10);
-    if (navigator.vibrate) navigator.vibrate(15);
-    lifeHold.timer = window.setTimeout(step, LIFE_REPEAT_MS);
+  lifeHold = {
+    timer: window.setTimeout(() => {
+      if (!game || !lifeHold) return;
+      lifeHold.fired = true;
+      // The tap that ends this hold must not add ±1 on top.
+      suppressLifeClickUntil = Infinity;
+      changeLife(side, direction * 10);
+      if (navigator.vibrate) navigator.vibrate(15);
+    }, LIFE_HOLD_MS)
   };
-  lifeHold = { timer: window.setTimeout(step, LIFE_HOLD_MS) };
 }
 
 function stopLifeHold() {
-  if (lifeHold) window.clearTimeout(lifeHold.timer);
+  if (!lifeHold) return;
+  window.clearTimeout(lifeHold.timer);
+  if (lifeHold.fired) suppressLifeClickUntil = Date.now() + 400;
   lifeHold = null;
 }
 
