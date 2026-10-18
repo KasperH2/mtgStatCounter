@@ -2803,8 +2803,8 @@ function closeGame() {
   render();
 }
 
-// Holding a − / + side for a second changes life by 10, once per hold.
-const LIFE_HOLD_MS = 1000;
+// Holding a − / + side for 0.5 s changes life by 10, once per hold.
+const LIFE_HOLD_MS = 500;
 let lifeHold = null;
 let suppressLifeClickUntil = 0;
 
