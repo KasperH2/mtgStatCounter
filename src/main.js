@@ -2129,12 +2129,11 @@ async function loadRemoteTournament() {
   applyRemoteTournament(data);
 }
 
+// Only problems are shown; normal sharing happens silently.
 function tournamentSyncNote() {
   if (tournamentRemote === "unavailable") return ["local", "Saved on this phone only. Sharing isn't set up in Supabase yet."];
   if (tournamentSync === "error") return ["error", "Not shared yet. Retrying…"];
-  if (tournamentSync === "saving") return ["saving", "Sharing…"];
-  if (tournamentRemote === "available") return ["saved", "Shared with both phones"];
-  return ["saving", "Connecting…"];
+  return null;
 }
 
 function deckRate(side, name) {
@@ -2155,7 +2154,7 @@ function openTournamentSetup() {
     reveal: "open",
     direction: "low",
     pick: "choose",
-    drawSize: DEFAULT_TOURNAMENT_DRAW_SIZE,
+    drawSize: null,
     picks: { row: [], column: [] }
   };
   renderAtTop();
@@ -2174,16 +2173,20 @@ function setAllTournamentPicks(side, all) {
 
 // The draw can use anything from the single first-ranked deck up to all the decks each player brought.
 function setupDrawLimit() {
-  const counts = [tournamentSetup.picks.row.length, tournamentSetup.picks.column.length].filter((n) => n > 0);
-  return counts.length ? Math.min(...counts) : DEFAULT_TOURNAMENT_DRAW_SIZE;
+  return Math.min(tournamentSetup.picks.row.length, tournamentSetup.picks.column.length);
 }
 
+// Until it is set with − / +, it follows the number of decks picked (0 before anything is picked).
 function setupDrawSize() {
-  return Math.max(1, Math.min(tournamentSetup.drawSize, setupDrawLimit()));
+  const limit = setupDrawLimit();
+  if (tournamentSetup.drawSize === null) return limit;
+  return Math.min(tournamentSetup.drawSize, limit);
 }
 
 function stepTournamentDraw(delta) {
-  tournamentSetup.drawSize = Math.max(1, Math.min(setupDrawSize() + delta, setupDrawLimit()));
+  const limit = setupDrawLimit();
+  if (limit < 1) return;
+  tournamentSetup.drawSize = Math.max(1, Math.min(setupDrawSize() + delta, limit));
   render();
 }
 
@@ -2424,8 +2427,9 @@ function renderTournamentSetup() {
 
   const edge = directionWord(tournamentSetup.direction);
   const firstDecks = drawSize === 1 ? `${edge}-ranked deck` : `${drawSize} ${edge}-ranked decks`;
-  const pickNote =
-    pick === "choose"
+  const pickNote = drawSize === 0
+    ? "Follows how many decks you each pick below. Lower it with − if you want fewer to pick from."
+    : pick === "choose"
       ? drawSize === 1
         ? `You each play your ${edge}-ranked deck still in.`
         : `You each choose your deck yourselves from your ${firstDecks} still in.`
@@ -2475,7 +2479,7 @@ function renderTournamentSetup() {
             <button type="button" data-tournament-draw-step="1" aria-label="More decks to pick from" ${drawSize >= drawLimit ? "disabled" : ""}>+</button>
           </div>
         </div>
-        <p class="view-note">${pickNote}${rowCount || columnCount ? "" : " Up to all the decks you bring."}</p>
+        <p class="view-note">${pickNote}</p>
         ${playerBlock("row")}
         ${playerBlock("column")}
       </div>
@@ -2584,13 +2588,35 @@ function renderTournamentView() {
     </div>`;
   };
 
+  // Each deck's overall win rate when the tournament started, and now.
+  const winRateChangesMarkup = () => {
+    const block = (side) => `<p class="section-label">${playerDot(side)}${PLAYER_NAMES[side]}'s decks</p>
+      <div class="card list">${t.order[side]
+        .map((name) => {
+          const before = startRateOf(side, name);
+          const summary = deckRate(side, name);
+          const now = summary ? summary.rate : null;
+          const change = before !== null && now !== null ? now - before : null;
+          const changeText = change === null ? "" : change > 0 ? `+${change}` : change < 0 ? `−${Math.abs(change)}` : "±0";
+          const changeClass = change > 0 ? "is-up" : change < 0 ? "is-down" : "is-same";
+          return `<div class="list-row rate-change-row">
+            <span class="list-name">${escapeHtml(name)}</span>
+            <span class="rate-change">${formatRate(before)} → ${formatRate(now)}</span>
+            <span class="rate-delta ${changeClass}">${changeText}</span>
+          </div>`;
+        })
+        .join("")}</div>`;
+    return `<p class="section-label">Win rate changes</p>${block("row")}${block("column")}`;
+  };
+
   let main;
   if (t.champion) {
     main = `<article class="card champion-card is-${t.champion}">
       <p class="section-label">Tournament winner</p>
       <p class="champion-name">${PLAYER_NAMES[t.champion]}</p>
       <p class="view-note">${t.history.length} games played · ${modeLabel.toLowerCase()}</p>
-    </article>`;
+    </article>
+    ${winRateChangesMarkup()}`;
   } else {
     const { rowDeck, columnDeck } = t.current;
     const ready = Boolean(rowDeck && columnDeck);
@@ -2616,9 +2642,7 @@ function renderTournamentView() {
         .map((game) => {
           const winnerDeck = game.winner === "row" ? game.rowDeck : game.columnDeck;
           const loserDeck = game.winner === "row" ? game.columnDeck : game.rowDeck;
-          return `<div class="log-item">${playerDot(game.winner)}<span>${escapeHtml(winnerDeck)} beat ${escapeHtml(loserDeck)} · ${escapeHtml(
-            game.outDeck
-          )} out</span></div>`;
+          return `<div class="log-item">${playerDot(game.winner)}<span>${escapeHtml(winnerDeck)} beat ${escapeHtml(loserDeck)}</span></div>`;
         })
         .join("")}</div>`
     : "";
@@ -2638,7 +2662,7 @@ function renderTournamentView() {
         <h2>Tournament</h2>
         ${menuMarkup()}
       </div>
-      <p class="save-state is-${tournamentSyncNote()[0]}">${tournamentSyncNote()[1]}</p>
+      ${tournamentSyncNote() ? `<p class="save-state is-${tournamentSyncNote()[0]}">${tournamentSyncNote()[1]}</p>` : ""}
       <p class="view-note">${rules}</p>
       <p class="view-note">${PLAYER_NAMES.row} ${tournamentRemaining("row").length} left · ${PLAYER_NAMES.column} ${
         tournamentRemaining("column").length
@@ -2779,6 +2803,29 @@ function closeGame() {
   render();
 }
 
+// Holding a − / + side for half a second changes life by 10, and again every 0.6 s while held.
+const LIFE_HOLD_MS = 500;
+const LIFE_REPEAT_MS = 600;
+let lifeHold = null;
+let suppressLifeClickUntil = 0;
+
+function startLifeHold(side, direction) {
+  stopLifeHold();
+  const step = () => {
+    if (!game || !lifeHold) return;
+    suppressLifeClickUntil = Date.now() + 700;
+    changeLife(side, direction * 10);
+    if (navigator.vibrate) navigator.vibrate(15);
+    lifeHold.timer = window.setTimeout(step, LIFE_REPEAT_MS);
+  };
+  lifeHold = { timer: window.setTimeout(step, LIFE_HOLD_MS) };
+}
+
+function stopLifeHold() {
+  if (lifeHold) window.clearTimeout(lifeHold.timer);
+  lifeHold = null;
+}
+
 function changeLife(side, amount) {
   game.life[side] += amount;
   game.delta[side] += amount;
@@ -2893,7 +2940,11 @@ function renderGameScreen() {
     </div>
   `;
 
-  onClick("[data-life]", (el) => changeLife(el.dataset.life, Number(el.dataset.amount)));
+  // A tap is ±1; the click that ends a hold is ignored, since the hold already counted ±10.
+  onClick("[data-life]", (el) => {
+    if (Date.now() < suppressLifeClickUntil) return;
+    changeLife(el.dataset.life, Number(el.dataset.amount));
+  });
   onClick("[data-game-menu]", () => {
     game.menuOpen = !game.menuOpen;
     if (game.menuOpen) freshenSession(10);
@@ -3082,6 +3133,14 @@ async function initApp() {
     render();
   });
   window.addEventListener("offline", render);
+  document.addEventListener("pointerdown", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-life]") : null;
+    if (button && game) startLifeHold(button.dataset.life, Math.sign(Number(button.dataset.amount)));
+  });
+  ["pointerup", "pointercancel", "blur"].forEach((name) => window.addEventListener(name, stopLifeHold));
+  document.addEventListener("contextmenu", (event) => {
+    if (event.target instanceof Element && event.target.closest("[data-life]")) event.preventDefault();
+  });
   // Keep the game menu's full screen button label in step with the browser.
   document.addEventListener("fullscreenchange", () => {
     if (game && game.menuOpen) render();
