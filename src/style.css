@@ -2236,3 +2236,27 @@ select:focus-visible {
 .rate-delta.is-same {
   color: var(--muted);
 }
+
+/* Grid: total games in the bottom-right corner */
+.total-games {
+  padding: 0 4px;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty-state {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.empty-state p {
+  margin: 0;
+  color: var(--ink);
+}

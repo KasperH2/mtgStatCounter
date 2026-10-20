@@ -3,73 +3,11 @@ import { allowedEmails, supabase } from "./supabaseClient";
 
 const app = document.querySelector("#app");
 
-const initialState = {
-  rowDecks: [
-    "Dragons",
-    "Spirit",
-    "Keyword",
-    "Sphinx",
-    "Sacrifice",
-    "Lifegain",
-    "Door",
-    "Eldrazi",
-    "Vehicle",
-    "Knights",
-    "Proliferate",
-    "Wurm",
-    "Deathfed",
-    "Token",
-    "Funfungus",
-    "Bloodrush"
-  ],
-  columnDecks: [
-    "Giants",
-    "Humans",
-    "+1/+1 Counter",
-    "Reanimate",
-    "Flicker",
-    "Untap",
-    "Scry",
-    "Delirium",
-    "Discard",
-    "Nightmare",
-    "20/20",
-    "Heroic",
-    "Zombies",
-    "Hand Deck",
-    "Activated",
-    "Grolnok"
-  ],
-  cells: [
-    [0, 0, 2, -1, 3, 0, -4, 0, 0, 0, 0, 2, 0, -1, -1, 2],
-    [2, -1, 0, -1, 1, -1, 0, 2, -5, 0, -1, -3, -3, -1, 0, 1],
-    [0, 0, 0, 0, 0, 0, 1, 0, 0, -1, 1, -1, 2, 0, 1, 0],
-    [0, 0, -1, 0, -2, 0, -1, 0, 0, 2, 0, -1, 0, 1, 0, 0],
-    [1, 1, 1, 0, 4, 0, 2, -5, 0, 1, 0, 1, 0, -1, 0, 0],
-    [0, 2, 0, -1, 3, 0, -1, 0, 0, -2, 0, -2, 1, -2, 0, 1],
-    [1, 0, 0, 0, 0, -2, 1, 1, 0, 0, 0, 2, -2, 0, 0, 0],
-    [0, 1, 1, 1, -1, 0, 4, -2, 2, 1, -1, 1, 2, 1, 0, 0],
-    [0, 0, 0, 0, 1, 0, 1, 0, -1, 0, -2, 1, 0, 0, -1, -1],
-    [1, 0, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, -2, 1],
-    [1, 1, 1, 0, 0, 2, 2, 4, 2, 0, 1, 1, 1, 2, 0, 1],
-    [0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 2, 1, 0, 1, 1, 0],
-    [0, -1, 1, 1, 2, 2, -1, 0, 0, 1, 0, 0, 2, 2, 0, 0],
-    [1, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1, 1],
-    [0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, -2, 2],
-    [0, 0, 0, -1, 1, 0, -1, 1, 1, 2, 2, 0, 0, 0, -6, 0]
-  ]
-};
-
-function makeDefaultMatrix() {
-  return initialState.cells.map((row) =>
-    row.map((score) => ({ score, games: Math.abs(score), updatedAt: null }))
-  );
-}
-
+// Decks and results come only from Supabase; nothing is built in.
 const state = {
-  rowDecks: [...initialState.rowDecks],
-  columnDecks: [...initialState.columnDecks],
-  matrix: makeDefaultMatrix()
+  rowDecks: [],
+  columnDecks: [],
+  matrix: []
 };
 
 const PLAYER_NAMES = { row: "Kasper", column: "Daniel" };
@@ -521,8 +459,10 @@ async function loadRemoteState() {
     .sort((a, b) => a.position - b.position)
     .map((row) => String(row.deck_name));
 
-  if (!rowDecks.length || !columnDecks.length || !(cellData || []).length) {
-    await persistRemoteState("idle");
+  if (!rowDecks.length || !columnDecks.length) {
+    state.rowDecks = rowDecks;
+    state.columnDecks = columnDecks;
+    state.matrix = rowDecks.map(() => columnDecks.map(() => ({ score: 0, games: 0, updatedAt: null })));
     return;
   }
 
@@ -1076,18 +1016,21 @@ function getLayoutOrder() {
   return unsortedOrder || { rowDecks: state.rowDecks, columnDecks: state.columnDecks };
 }
 
-function deckSortValue(axis, index, mode) {
-  const summary = getDeckSummary(axis, index);
-  if (mode === "diff") return summary.wins - summary.losses;
+function deckSortValue(summary, mode) {
+  if (mode === "wins") return summary.wins;
   if (mode === "rate") return summary.rate ?? -1;
   return summary.games;
 }
 
+// Highest value first. Ties: for wins, fewer losses first; otherwise more games first.
 function sortedDeckNames(axis, mode) {
   const decks = axis === "row" ? state.rowDecks : state.columnDecks;
   return decks
-    .map((name, index) => ({ name, value: deckSortValue(axis, index, mode), games: getDeckSummary(axis, index).games }))
-    .sort((a, b) => b.value - a.value || b.games - a.games)
+    .map((name, index) => {
+      const summary = getDeckSummary(axis, index);
+      return { name, value: deckSortValue(summary, mode), games: summary.games, losses: summary.losses };
+    })
+    .sort((a, b) => b.value - a.value || (mode === "wins" ? a.losses - b.losses : b.games - a.games))
     .map((deck) => deck.name);
 }
 
@@ -1105,7 +1048,7 @@ function applyGridSort(mode) {
 
 const SORT_MODES = [
   ["rate", "Win rate"],
-  ["diff", "Most wins"],
+  ["wins", "Most wins"],
   ["games", "Most games"]
 ];
 
@@ -1725,6 +1668,28 @@ function highlightSettingsMarkup() {
   return `<p class="subtle">No colors active</p>`;
 }
 
+// Every game logged adds one win, so adding up the wins counts exactly the games you've recorded.
+// The stored game counts are added up too, to spot any old hand-edited count that doesn't match.
+function totalGames() {
+  let fromWins = 0;
+  let stored = 0;
+  state.matrix.forEach((row) =>
+    row.forEach((cell) => {
+      const record = getRecord(cell);
+      fromWins += record.rowWins + record.columnWins;
+      stored += record.games;
+    })
+  );
+  return { fromWins, stored };
+}
+
+function totalGamesTitle() {
+  const { fromWins, stored } = totalGames();
+  return fromWins === stored
+    ? `${fromWins} games logged in total`
+    : `${fromWins} games from logged wins; the stored game counts add up to ${stored}`;
+}
+
 function renderGridView() {
   // Each deck's own record against all opponents.
   const totalValue = (axis, index) => {
@@ -1813,7 +1778,7 @@ function renderGridView() {
               ${state.columnDecks
                 .map((_, colIndex) => `<td class="sum-cell">${totalValue("column", colIndex)}</td>`)
                 .join("")}
-              <td></td>
+              <td class="total-games" title="${totalGamesTitle()}">${totalGames().fromWins}</td>
             </tr>
           </tfoot>
         </table>
@@ -2973,17 +2938,37 @@ function renderGameScreen() {
   }
 }
 
+function noDecksView() {
+  return `<section class="view-stack">
+    <div class="view-head">
+      <h2>${authError ? "Couldn't load your data" : "No decks yet"}</h2>
+      ${menuMarkup()}
+    </div>
+    <article class="card empty-state">
+      <p>${
+        authError
+          ? escapeHtml(authError)
+          : "There are no decks in the database yet. Add them in Supabase (the deck_layout table) and reload."
+      }</p>
+      <button type="button" class="start-game-button" data-reload>Try again</button>
+    </article>
+  </section>`;
+}
+
 function renderAppScreen() {
   if (game) {
     renderGameScreen();
     return;
   }
 
-  const views = {
-    log: renderLogView,
-    decks: renderDecksView,
-    grid: renderGridView
-  };
+  const hasDecks = state.rowDecks.length > 0 && state.columnDecks.length > 0;
+  const views = hasDecks
+    ? {
+        log: renderLogView,
+        decks: renderDecksView,
+        grid: renderGridView
+      }
+    : { log: noDecksView, decks: noDecksView, grid: noDecksView };
 
   app.innerHTML = `
     <div class="app-shell ${activeTab === "grid" && gridExpanded ? "is-expanded" : ""}">
@@ -3010,7 +2995,8 @@ function renderAppScreen() {
   const pickScroll = app.querySelector("[data-pick-scroll]");
   if (pickScroll) pickScroll.scrollTop = tournamentPickScrollTop;
 
-  if (activeTab === "grid") bindGridView();
+  if (activeTab === "grid" && hasDecks) bindGridView();
+  onClick("[data-reload]", () => window.location.reload());
   bindSharedEvents();
 }
 
